@@ -62,61 +62,7 @@ const sbDelete = async (table, match) => {
   await fetch(SUPABASE_URL + "/rest/v1/" + table + "?" + match, { method: "DELETE", headers: { ...sbHeaders, Prefer: "return=minimal" } });
 };
 
-// ─── Supabase Realtime (auto-sync across devices) ───
-const REALTIME_URL = SUPABASE_URL.replace("https://", "wss://") + "/realtime/v1/websocket?apikey=" + SUPABASE_KEY + "&vsn=1.0.0";
-let _realtimeWs = null;
-let _realtimeCallback = null;
-let _realtimeHeartbeat = null;
-
-const startRealtime = (onDataChange) => {
-  _realtimeCallback = onDataChange;
-  try {
-    if (_realtimeWs) { _realtimeWs.close(); clearInterval(_realtimeHeartbeat); }
-    _realtimeWs = new WebSocket(REALTIME_URL);
-    
-    _realtimeWs.onopen = () => {
-      // Subscribe to all table changes
-      const tables = ["suppliers", "products", "purchases", "purchase_items", "payments", "returns", "return_items"];
-      tables.forEach((table, i) => {
-        _realtimeWs.send(JSON.stringify({
-          topic: "realtime:public:" + table,
-          event: "phx_join",
-          payload: { config: { broadcast: { self: false }, presence: { key: "" }, postgres_changes: [{ event: "*", schema: "public", table: table }] } },
-          ref: String(i + 1)
-        }));
-      });
-      // Heartbeat to keep connection alive
-      _realtimeHeartbeat = setInterval(() => {
-        if (_realtimeWs.readyState === 1) {
-          _realtimeWs.send(JSON.stringify({ topic: "phoenix", event: "heartbeat", payload: {}, ref: "hb" }));
-        }
-      }, 30000);
-    };
-
-    _realtimeWs.onmessage = (evt) => {
-      try {
-        const msg = JSON.parse(evt.data);
-        if (msg.event === "postgres_changes" && _realtimeCallback) {
-          _realtimeCallback();
-        }
-      } catch (e) {}
-    };
-
-    _realtimeWs.onclose = () => {
-      clearInterval(_realtimeHeartbeat);
-      // Auto-reconnect after 3 seconds
-      setTimeout(() => { if (_realtimeCallback) startRealtime(_realtimeCallback); }, 3000);
-    };
-
-    _realtimeWs.onerror = () => { _realtimeWs.close(); };
-  } catch (e) { console.error("Realtime error:", e); }
-};
-
-const stopRealtime = () => {
-  _realtimeCallback = null;
-  if (_realtimeWs) { _realtimeWs.close(); _realtimeWs = null; }
-  if (_realtimeHeartbeat) { clearInterval(_realtimeHeartbeat); }
-};
+// ─── Auto-Sync (polls for changes + refreshes when app comes back to focus) ───
 
 // ─── Local cache layer (loads from Supabase, caches in memory) ───
 let _cache = {};
@@ -322,20 +268,32 @@ export default function ShopLedger() {
     setTimeout(() => { setDbReady(true); setRefreshing(false); }, 100);
   };
 
-  // Start Realtime auto-sync when app is ready
+  // Auto-sync: refresh data every 15 seconds + when app comes back to focus
   useEffect(() => {
     if (!dbReady) return;
-    let debounce = null;
-    startRealtime(() => {
-      // Debounce: wait 500ms after last change before refreshing
-      if (debounce) clearTimeout(debounce);
-      debounce = setTimeout(async () => {
-        await DB.reload();
-        setDbReady(false);
-        setTimeout(() => setDbReady(true), 50);
-      }, 500);
+
+    // Poll every 15 seconds for changes
+    const poll = setInterval(async () => {
+      await DB.reload();
+      setDbReady(false);
+      setTimeout(() => setDbReady(true), 50);
+    }, 15000);
+
+    // Refresh immediately when user switches back to the app/tab
+    const onFocus = async () => {
+      await DB.reload();
+      setDbReady(false);
+      setTimeout(() => setDbReady(true), 50);
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") onFocus();
     });
-    return () => stopRealtime();
+
+    return () => {
+      clearInterval(poll);
+      window.removeEventListener("focus", onFocus);
+    };
   }, [dbReady]);
 
   // Load data from Supabase on mount
