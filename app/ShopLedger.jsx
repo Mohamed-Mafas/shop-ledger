@@ -216,8 +216,10 @@ const Empty = ({ icon, text, sub }) => (
 // ─── Data is loaded from Supabase on app mount ───
 
 // ─── Data Hooks (Supabase-backed) ───
-const useData = (key) => {
+const useData = (key, dbReady) => {
   const [data, setData] = useState(() => DB.get(key));
+  // Re-sync from cache when database finishes loading
+  useEffect(() => { if (dbReady) setData(DB.get(key)); }, [dbReady, key]);
   const save = useCallback((newData) => { DB.set(key, newData); setData(newData); }, [key]);
   const add = useCallback(async (item) => {
     const { id, ...rest } = item;
@@ -269,13 +271,13 @@ export default function ShopLedger() {
     tryLoad();
   }, []);
 
-  const suppliers = useData("suppliers");
-  const products = useData("products");
-  const purchases = useData("purchases");
-  const purchaseItems = useData("purchase_items");
-  const payments = useData("payments");
-  const returns = useData("returns");
-  const returnItems = useData("return_items");
+  const suppliers = useData("suppliers", dbReady);
+  const products = useData("products", dbReady);
+  const purchases = useData("purchases", dbReady);
+  const purchaseItems = useData("purchase_items", dbReady);
+  const payments = useData("payments", dbReady);
+  const returns = useData("returns", dbReady);
+  const returnItems = useData("return_items", dbReady);
 
   const notify = (message, type = "success") => setToast({ message, type });
   const askConfirm = (title, message, onYes, requirePin = false) => setConfirm({ title, message, onYes, onNo: () => setConfirm(null), requirePin });
@@ -337,8 +339,8 @@ export default function ShopLedger() {
 
   const refreshAll = async () => {
     await DB.reload();
-    suppliers.refresh(); products.refresh(); purchases.refresh();
-    purchaseItems.refresh(); payments.refresh(); returns.refresh(); returnItems.refresh();
+    setDbReady(false);
+    setTimeout(() => setDbReady(true), 50);
   };
 
 
