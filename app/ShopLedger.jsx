@@ -218,10 +218,10 @@ const Empty = ({ icon, text, sub }) => (
 // ─── Data is loaded from Supabase on app mount ───
 
 // ─── Data Hooks (Supabase-backed) ───
-const useData = (key, dbReady) => {
+const useData = (key, refreshTick) => {
   const [data, setData] = useState(() => DB.get(key));
-  // Re-sync from cache when database finishes loading
-  useEffect(() => { if (dbReady) setData(DB.get(key)); }, [dbReady, key]);
+  // Re-sync from cache when refreshTick changes
+  useEffect(() => { setData(DB.get(key)); }, [refreshTick, key]);
   const save = useCallback((newData) => { DB.set(key, newData); setData(newData); }, [key]);
   const add = useCallback(async (item) => {
     const { id, ...rest } = item;
@@ -260,77 +260,61 @@ export default function ShopLedger() {
   const [confirm, setConfirm] = useState(null);
   const [dbReady, setDbReady] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshTick, setRefreshTick] = useState(0);
+  const syncingRef = useRef(false);
+
+  const silentRefresh = useCallback(async () => {
+    if (syncingRef.current) return;
+    syncingRef.current = true;
+    try {
+      await DB.reload();
+      setRefreshTick(t => t + 1);
+    } catch (e) { console.error("Sync error:", e); }
+    syncingRef.current = false;
+  }, []);
 
   const handleRefresh = async () => {
     setRefreshing(true);
-    await DB.reload();
-    setDbReady(false);
-    setTimeout(() => { setDbReady(true); setRefreshing(false); }, 100);
+    await silentRefresh();
+    setRefreshing(false);
   };
 
-  // Auto-sync using a counter to trigger re-renders
-  const [syncCount, setSyncCount] = useState(0);
-  const syncRef = useRef(false);
-
-  const doSync = useCallback(async () => {
-    if (syncRef.current) return; // prevent overlapping syncs
-    syncRef.current = true;
-    try {
-      await DB.reload();
-      setSyncCount(c => c + 1);
-    } catch (e) { console.error("Sync error:", e); }
-    syncRef.current = false;
-  }, []);
-
-  // Re-sync useData when syncCount changes
-  useEffect(() => {
-    if (dbReady && syncCount > 0) {
-      // Force all useData hooks to re-read from cache
-      setDbReady(false);
-      setTimeout(() => setDbReady(true), 50);
-    }
-  }, [syncCount]);
-
-  // Poll every 15 seconds
+  // Auto-sync: poll every 15 seconds (silent, no blinking)
   useEffect(() => {
     if (!dbReady) return;
-    const poll = setInterval(doSync, 15000);
+    const poll = setInterval(silentRefresh, 15000);
     return () => clearInterval(poll);
-  }, [dbReady, doSync]);
+  }, [dbReady, silentRefresh]);
 
-  // Refresh when app comes back to focus (switching tabs/apps)
+  // Refresh when user switches back to the app
   useEffect(() => {
     const onVisible = () => {
-      if (document.visibilityState === "visible") doSync();
+      if (document.visibilityState === "visible") silentRefresh();
     };
     document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("focus", doSync);
-    return () => {
-      document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("focus", doSync);
-    };
-  }, [doSync]);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [silentRefresh]);
 
   // Load data from Supabase on mount
   useEffect(() => {
     let retries = 0;
     const tryLoad = () => {
-      DB.load().then(() => setDbReady(true)).catch(e => {
+      DB.load().then(() => { setDbReady(true); setRefreshTick(1); }).catch(e => {
         console.error("DB load error:", e);
         if (retries < 2) { retries++; DB._loaded = false; setTimeout(tryLoad, 2000); }
-        else setDbReady(true); // show app anyway with empty data
+        else { setDbReady(true); setRefreshTick(1); }
       });
     };
     tryLoad();
   }, []);
 
-  const suppliers = useData("suppliers", dbReady);
-  const products = useData("products", dbReady);
-  const purchases = useData("purchases", dbReady);
-  const purchaseItems = useData("purchase_items", dbReady);
-  const payments = useData("payments", dbReady);
-  const returns = useData("returns", dbReady);
-  const returnItems = useData("return_items", dbReady);
+  const suppliers = useData("suppliers", refreshTick);
+  const products = useData("products", refreshTick);
+  const purchases = useData("purchases", refreshTick);
+  const purchaseItems = useData("purchase_items", refreshTick);
+  const payments = useData("payments", refreshTick);
+  const returns = useData("returns", refreshTick);
+  const returnItems = useData("return_items", refreshTick);
 
   const notify = (message, type = "success") => setToast({ message, type });
   const askConfirm = (title, message, onYes, requirePin = false) => setConfirm({ title, message, onYes, onNo: () => setConfirm(null), requirePin });
@@ -391,9 +375,7 @@ export default function ShopLedger() {
   ];
 
   const refreshAll = async () => {
-    await DB.reload();
-    setDbReady(false);
-    setTimeout(() => setDbReady(true), 50);
+    await silentRefresh();
   };
 
 
