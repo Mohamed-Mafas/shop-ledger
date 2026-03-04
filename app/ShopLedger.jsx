@@ -257,6 +257,14 @@ export default function ShopLedger() {
   const [toast, setToast] = useState(null);
   const [confirm, setConfirm] = useState(null);
   const [dbReady, setDbReady] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    await DB.reload();
+    setDbReady(false);
+    setTimeout(() => { setDbReady(true); setRefreshing(false); }, 100);
+  };
 
   // Load data from Supabase on mount
   useEffect(() => {
@@ -363,6 +371,9 @@ export default function ShopLedger() {
             </button>
           ))}
         </nav>
+        <button onClick={handleRefresh} disabled={refreshing} className="flex items-center gap-3 px-5 py-4 text-slate-400 hover:text-white hover:bg-slate-800 border-t border-slate-700 transition">
+          <Icon name="refresh" size={20} /><span>{refreshing ? "Refreshing..." : "Refresh Data"}</span>
+        </button>
         <button onClick={logout} className="flex items-center gap-3 px-5 py-4 text-slate-400 hover:text-white hover:bg-slate-800 border-t border-slate-700 transition">
           <Icon name="logout" size={20} /><span>Logout</span>
         </button>
@@ -375,6 +386,9 @@ export default function ShopLedger() {
           <h1 className="font-extrabold text-lg md:text-xl text-slate-800">📒 Shop Ledger</h1>
           <div className="flex items-center gap-2 md:gap-3">
             <span className="text-xs md:text-sm text-slate-500 bg-slate-100 px-2 md:px-3 py-1 md:py-1.5 rounded-full font-medium">{user.name}</span>
+            <button onClick={handleRefresh} disabled={refreshing} className={`w-9 h-9 md:w-11 md:h-11 flex items-center justify-center rounded-full hover:bg-blue-100 bg-blue-50 transition ${refreshing ? "animate-spin" : ""}`}>
+              <Icon name="refresh" size={18} color="#2563eb" />
+            </button>
             <button onClick={logout} className="w-9 h-9 md:w-11 md:h-11 flex items-center justify-center rounded-full hover:bg-slate-100 bg-slate-50">
               <Icon name="logout" size={18} color="#64748b" />
             </button>
