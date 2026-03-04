@@ -268,33 +268,48 @@ export default function ShopLedger() {
     setTimeout(() => { setDbReady(true); setRefreshing(false); }, 100);
   };
 
-  // Auto-sync: refresh data every 15 seconds + when app comes back to focus
+  // Auto-sync using a counter to trigger re-renders
+  const [syncCount, setSyncCount] = useState(0);
+  const syncRef = useRef(false);
+
+  const doSync = useCallback(async () => {
+    if (syncRef.current) return; // prevent overlapping syncs
+    syncRef.current = true;
+    try {
+      await DB.reload();
+      setSyncCount(c => c + 1);
+    } catch (e) { console.error("Sync error:", e); }
+    syncRef.current = false;
+  }, []);
+
+  // Re-sync useData when syncCount changes
+  useEffect(() => {
+    if (dbReady && syncCount > 0) {
+      // Force all useData hooks to re-read from cache
+      setDbReady(false);
+      setTimeout(() => setDbReady(true), 50);
+    }
+  }, [syncCount]);
+
+  // Poll every 15 seconds
   useEffect(() => {
     if (!dbReady) return;
+    const poll = setInterval(doSync, 15000);
+    return () => clearInterval(poll);
+  }, [dbReady, doSync]);
 
-    // Poll every 15 seconds for changes
-    const poll = setInterval(async () => {
-      await DB.reload();
-      setDbReady(false);
-      setTimeout(() => setDbReady(true), 50);
-    }, 15000);
-
-    // Refresh immediately when user switches back to the app/tab
-    const onFocus = async () => {
-      await DB.reload();
-      setDbReady(false);
-      setTimeout(() => setDbReady(true), 50);
+  // Refresh when app comes back to focus (switching tabs/apps)
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") doSync();
     };
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") onFocus();
-    });
-
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", doSync);
     return () => {
-      clearInterval(poll);
-      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", doSync);
     };
-  }, [dbReady]);
+  }, [doSync]);
 
   // Load data from Supabase on mount
   useEffect(() => {
