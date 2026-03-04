@@ -42,8 +42,13 @@ const sbHeaders = {
 };
 
 const sbGet = async (table, query = "") => {
-  const r = await fetch(SUPABASE_URL + "/rest/v1/" + table + "?select=*" + query, { headers: sbHeaders });
-  return r.json();
+  try {
+    const r = await fetch(SUPABASE_URL + "/rest/v1/" + table + "?select=*" + query, {
+      headers: { apikey: SUPABASE_KEY, Authorization: "Bearer " + SUPABASE_KEY }
+    });
+    if (!r.ok) { console.error("sbGet error:", table, r.status); return []; }
+    return await r.json();
+  } catch (e) { console.error("sbGet failed:", table, e); return []; }
 };
 const sbInsert = async (table, data) => {
   const r = await fetch(SUPABASE_URL + "/rest/v1/" + table, { method: "POST", headers: sbHeaders, body: JSON.stringify(Array.isArray(data) ? data : [data]) });
@@ -63,18 +68,23 @@ const DB = {
   _loaded: false,
   load: async () => {
     if (DB._loaded) return;
-    const [users, suppliers, products, purchases, purchase_items, payments, returns, return_items] = await Promise.all([
-      sbGet("users", "&is_active=eq.true&order=role"),
-      sbGet("suppliers", "&order=name"),
-      sbGet("products", "&order=name"),
-      sbGet("purchases", "&order=invoice_date.desc"),
-      sbGet("purchase_items"),
-      sbGet("payments", "&order=payment_date.desc"),
-      sbGet("returns", "&order=return_date.desc"),
-      sbGet("return_items"),
-    ]);
-    _cache = { users, suppliers, products, purchases, purchase_items, payments, returns, return_items };
-    DB._loaded = true;
+    try {
+      const [users, suppliers, products, purchases, purchase_items, payments, returns, return_items] = await Promise.all([
+        sbGet("users", "&is_active=eq.true&order=role"),
+        sbGet("suppliers", "&order=name"),
+        sbGet("products", "&order=name"),
+        sbGet("purchases", "&order=invoice_date.desc"),
+        sbGet("purchase_items"),
+        sbGet("payments", "&order=payment_date.desc"),
+        sbGet("returns", "&order=return_date.desc"),
+        sbGet("return_items"),
+      ]);
+      _cache = { users, suppliers, products, purchases, purchase_items, payments, returns, return_items };
+      DB._loaded = true;
+    } catch (e) {
+      console.error("DB load failed:", e);
+      throw e;
+    }
   },
   reload: async () => { DB._loaded = false; await DB.load(); },
   get: (key, fallback = []) => _cache[key] || fallback,
@@ -248,7 +258,15 @@ export default function ShopLedger() {
 
   // Load data from Supabase on mount
   useEffect(() => {
-    DB.load().then(() => setDbReady(true)).catch(e => console.error("DB load error:", e));
+    let retries = 0;
+    const tryLoad = () => {
+      DB.load().then(() => setDbReady(true)).catch(e => {
+        console.error("DB load error:", e);
+        if (retries < 2) { retries++; DB._loaded = false; setTimeout(tryLoad, 2000); }
+        else setDbReady(true); // show app anyway with empty data
+      });
+    };
+    tryLoad();
   }, []);
 
   const suppliers = useData("suppliers");
