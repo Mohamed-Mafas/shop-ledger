@@ -71,7 +71,7 @@ const DB = {
   load: async () => {
     if (DB._loaded) return;
     try {
-      const [users, suppliers, products, purchases, purchase_items, payments, returns, return_items] = await Promise.all([
+      const [users, suppliers, products, purchases, purchase_items, payments, returns, return_items, payment_allocations] = await Promise.all([
         sbGet("users", "&is_active=eq.true&order=role"),
         sbGet("suppliers", "&order=name"),
         sbGet("products", "&order=name"),
@@ -80,8 +80,9 @@ const DB = {
         sbGet("payments", "&order=payment_date.desc"),
         sbGet("returns", "&order=return_date.desc"),
         sbGet("return_items"),
+        sbGet("payment_allocations"),
       ]);
-      _cache = { users, suppliers, products, purchases, purchase_items, payments, returns, return_items };
+      _cache = { users, suppliers, products, purchases, purchase_items, payments, returns, return_items, payment_allocations };
       DB._loaded = true;
     } catch (e) {
       console.error("DB load failed:", e);
@@ -315,6 +316,113 @@ export default function ShopLedger() {
   const payments = useData("payments", refreshTick);
   const returns = useData("returns", refreshTick);
   const returnItems = useData("return_items", refreshTick);
+  const paymentAllocations = useData("payment_allocations", refreshTick);
+
+  // ── FIFO Allocation Helper ──
+  // Given a supplier, computes which credit/partial invoices are unpaid/partially-paid
+  // by looking at existing allocations, then previews how a new payment would be distributed
+  const computeFifoPreview = useCallback((supplierId, paymentAmount, excludePaymentId = null) => {
+    // Get all credit/partial invoices for this supplier, sorted oldest first
+    const creditInvoices = purchases.data
+      .filter(p => p.supplier_id === supplierId && (p.payment_type === "Credit" || p.payment_type === "Partial"))
+      .sort((a, b) => a.invoice_date.localeCompare(b.invoice_date) || (a.created_at || "").localeCompare(b.created_at || ""));
+
+    // Get existing allocations (exclude current payment if editing)
+    const existingAllocs = paymentAllocations.data.filter(a =>
+      a.supplier_id === supplierId && a.payment_id !== excludePaymentId
+    );
+
+    // Also account for returns as credits against the supplier
+    const totalReturns = returns.data
+      .filter(r => r.supplier_id === supplierId)
+      .reduce((s, r) => s + r.total_amount, 0);
+
+    // Calculate how much each invoice still owes
+    const invoiceBalances = creditInvoices.map(inv => {
+      const invoiceCredit = inv.total_amount - (inv.amount_paid || 0); // amount that went on credit
+      const alreadyAllocated = existingAllocs
+        .filter(a => a.purchase_id === inv.id)
+        .reduce((s, a) => s + a.allocated_amount, 0);
+      const remaining = Math.max(0, Math.round((invoiceCredit - alreadyAllocated) * 100) / 100);
+      return { ...inv, invoiceCredit, alreadyAllocated, remaining };
+    }).filter(inv => inv.remaining > 0);
+
+    // Allocate the payment amount using FIFO
+    let remaining = parseFloat(paymentAmount) || 0;
+    const allocations = [];
+    for (const inv of invoiceBalances) {
+      if (remaining <= 0) break;
+      const allocate = Math.min(remaining, inv.remaining);
+      allocations.push({
+        purchase_id: inv.id,
+        invoice_number: inv.invoice_number || "N/A",
+        invoice_date: inv.invoice_date,
+        invoice_total: inv.total_amount,
+        invoice_credit: inv.invoiceCredit,
+        already_paid: inv.alreadyAllocated,
+        remaining_before: inv.remaining,
+        allocated_amount: Math.round(allocate * 100) / 100,
+        remaining_after: Math.round((inv.remaining - allocate) * 100) / 100,
+        fully_settled: Math.round((inv.remaining - allocate) * 100) / 100 === 0,
+      });
+      remaining = Math.round((remaining - allocate) * 100) / 100;
+    }
+
+    return {
+      allocations,
+      totalAllocated: Math.round((parseFloat(paymentAmount || 0) - remaining) * 100) / 100,
+      unallocated: remaining, // excess payment beyond all invoices
+      unpaidInvoices: invoiceBalances.length,
+    };
+  }, [purchases.data, paymentAllocations.data, returns.data]);
+
+  // Get allocation info for a specific invoice (how much has been paid via allocations)
+  const getInvoiceAllocations = useCallback((purchaseId) => {
+    return paymentAllocations.data
+      .filter(a => a.purchase_id === purchaseId)
+      .map(a => {
+        const payment = payments.data.find(p => p.id === a.payment_id);
+        return { ...a, payment };
+      });
+  }, [paymentAllocations.data, payments.data]);
+
+  // Get allocation info for a specific payment (which invoices it settled)
+  const getPaymentAllocations = useCallback((paymentId) => {
+    return paymentAllocations.data
+      .filter(a => a.payment_id === paymentId)
+      .map(a => {
+        const purchase = purchases.data.find(p => p.id === a.purchase_id);
+        return { ...a, purchase };
+      });
+  }, [paymentAllocations.data, purchases.data]);
+
+  // Get unpaid invoices for a supplier (used in manual allocation mode)
+  const getUnpaidInvoices = useCallback((supplierId, excludePaymentId = null) => {
+    const creditInvoices = purchases.data
+      .filter(p => p.supplier_id === supplierId && (p.payment_type === "Credit" || p.payment_type === "Partial"))
+      .sort((a, b) => a.invoice_date.localeCompare(b.invoice_date) || (a.created_at || "").localeCompare(b.created_at || ""));
+
+    const existingAllocs = paymentAllocations.data.filter(a =>
+      a.supplier_id === supplierId && a.payment_id !== excludePaymentId
+    );
+
+    return creditInvoices.map(inv => {
+      const invoiceCredit = inv.total_amount - (inv.amount_paid || 0);
+      const alreadyAllocated = existingAllocs
+        .filter(a => a.purchase_id === inv.id)
+        .reduce((s, a) => s + a.allocated_amount, 0);
+      const remaining = Math.max(0, Math.round((invoiceCredit - alreadyAllocated) * 100) / 100);
+      return {
+        purchase_id: inv.id,
+        invoice_number: inv.invoice_number || "N/A",
+        invoice_date: inv.invoice_date,
+        invoice_total: inv.total_amount,
+        invoice_credit: invoiceCredit,
+        already_paid: alreadyAllocated,
+        remaining,
+      };
+    }).filter(inv => inv.remaining > 0);
+  }, [purchases.data, paymentAllocations.data]);
 
   const notify = (message, type = "success") => setToast({ message, type });
   const askConfirm = (title, message, onYes, requirePin = false) => setConfirm({ title, message, onYes, onNo: () => setConfirm(null), requirePin });
@@ -426,11 +534,11 @@ export default function ShopLedger() {
           {page === "dashboard" && <Dashboard {...{ suppliers, products, purchases, purchaseItems, payments, returns, getOutstanding, setPage, notify, user }} />}
           {page === "suppliers" && <Suppliers {...{ suppliers, getOutstanding, notify, askConfirm, purchases, purchaseItems, payments, returns }} />}
           {page === "products" && <Products {...{ products, getLastPrice, notify, askConfirm }} />}
-          {page === "purchases" && <Purchases {...{ suppliers, products, purchases, purchaseItems, getOutstanding, getLastPrice, notify, askConfirm, refreshAll, purchaseDraftRef }} />}
-          {page === "payments" && <Payments {...{ suppliers, payments, getOutstanding, notify, askConfirm, refreshAll }} />}
+          {page === "purchases" && <Purchases {...{ suppliers, products, purchases, purchaseItems, getOutstanding, getLastPrice, notify, askConfirm, refreshAll, purchaseDraftRef, getInvoiceAllocations, payments }} />}
+          {page === "payments" && <Payments {...{ suppliers, payments, paymentAllocations, getOutstanding, notify, askConfirm, refreshAll, computeFifoPreview, getPaymentAllocations, getUnpaidInvoices, purchases }} />}
           {page === "returns" && <Returns {...{ suppliers, products, returns, returnItems, getOutstanding, notify, askConfirm, refreshAll }} />}
           {page === "price-check" && <PriceCheck {...{ products, purchaseItems, purchases, suppliers, getLastPrice }} />}
-          {page === "reports" && <Reports {...{ suppliers, products, purchases, purchaseItems, payments, returns, returnItems, getOutstanding }} />}
+          {page === "reports" && <Reports {...{ suppliers, products, purchases, purchaseItems, payments, returns, returnItems, getOutstanding, paymentAllocations }} />}
         </div>
       </main>
 
@@ -1084,7 +1192,7 @@ function Products({ products, getLastPrice, notify, askConfirm }) {
 // ═══════════════════════════════════════
 //  PURCHASES
 // ═══════════════════════════════════════
-function Purchases({ suppliers, products, purchases, purchaseItems, getOutstanding, getLastPrice, notify, askConfirm, refreshAll, purchaseDraftRef }) {
+function Purchases({ suppliers, products, purchases, purchaseItems, getOutstanding, getLastPrice, notify, askConfirm, refreshAll, purchaseDraftRef, getInvoiceAllocations, payments }) {
   // Check if there's a draft to restore on mount
   const draft = purchaseDraftRef.current;
   const [showForm, setShowForm] = useState(false);
@@ -1318,8 +1426,12 @@ function Purchases({ suppliers, products, purchases, purchaseItems, getOutstandi
         {filteredPurchases.length ? filteredPurchases.map(p => {
           const supp = suppliers.data.find(s => s.id === p.supplier_id);
           const pItems = purchaseItems.data.filter(i => i.purchase_id === p.id);
+          const allocs = getInvoiceAllocations(p.id);
+          const totalAllocated = allocs.reduce((s, a) => s + a.allocated_amount, 0);
+          const creditAmount = (p.payment_type === "Credit" || p.payment_type === "Partial") ? p.total_amount - (p.amount_paid || 0) : 0;
+          const fullySettled = creditAmount > 0 && totalAllocated >= creditAmount;
           return (
-            <div key={p.id} onClick={() => setViewPurchase(p)} className="bg-white rounded-xl border border-slate-200 p-4 hover:shadow-md transition cursor-pointer active:bg-slate-50">
+            <div key={p.id} onClick={() => setViewPurchase(p)} className={`bg-white rounded-xl border p-4 hover:shadow-md transition cursor-pointer active:bg-slate-50 ${fullySettled ? "border-emerald-200" : "border-slate-200"}`}>
               <div className="flex items-start justify-between">
                 <div>
                   <p className="font-bold text-lg text-slate-800">{supp?.name || "Unknown"}</p>
@@ -1330,8 +1442,10 @@ function Purchases({ suppliers, products, purchases, purchaseItems, getOutstandi
                 <div className="text-right">
                   <p className="font-extrabold text-xl text-blue-600">{LKR(p.total_amount)}</p>
                   {p.payment_type === "Partial" && <p className="text-xs text-emerald-600">Paid: {LKR(p.amount_paid)}</p>}
-                  {p.payment_type === "Credit" && <p className="text-xs text-red-500">Credit (Unpaid)</p>}
+                  {p.payment_type === "Credit" && !fullySettled && totalAllocated === 0 && <p className="text-xs text-red-500">Credit (Unpaid)</p>}
                   {p.payment_type === "Cash" && <p className="text-xs text-emerald-500">Paid in Full</p>}
+                  {fullySettled && <p className="text-xs text-emerald-600 font-bold">✓ Settled via FIFO</p>}
+                  {!fullySettled && totalAllocated > 0 && <p className="text-xs text-amber-600">Partly settled: {LKR(totalAllocated)}</p>}
                 </div>
               </div>
             </div>
@@ -1420,6 +1534,57 @@ function Purchases({ suppliers, products, purchases, purchaseItems, getOutstandi
                   )}
                 </div>
               </div>
+
+              {/* FIFO Payment Allocations for this invoice */}
+              {(p.payment_type === "Credit" || p.payment_type === "Partial") && (() => {
+                const allocs = getInvoiceAllocations(p.id);
+                const totalAllocated = allocs.reduce((s, a) => s + a.allocated_amount, 0);
+                const creditAmount = p.total_amount - (p.amount_paid || 0);
+                const remainingAfterAlloc = Math.max(0, Math.round((creditAmount - totalAllocated) * 100) / 100);
+                const fullyPaid = remainingAfterAlloc === 0 && totalAllocated > 0;
+                return (
+                  <div>
+                    <h4 className="font-bold text-slate-700 mb-2">🔄 Payment Allocations (FIFO)</h4>
+                    {allocs.length > 0 ? (
+                      <div className={`border rounded-xl overflow-hidden ${fullyPaid ? "border-emerald-200 bg-emerald-50" : "border-slate-200 bg-white"}`}>
+                        {fullyPaid && (
+                          <div className="px-4 py-2 bg-emerald-100 text-emerald-700 text-sm font-bold flex items-center gap-2">
+                            <Icon name="check" size={16} color="#059669" /> Invoice Fully Settled
+                          </div>
+                        )}
+                        <div className="p-3 space-y-2">
+                          {allocs.map((a, i) => (
+                            <div key={i} className="flex items-center justify-between bg-white rounded-lg px-3 py-2 border border-slate-100">
+                              <div>
+                                <p className="text-sm font-semibold text-slate-700">Payment on {fmtDate(a.payment?.payment_date)}</p>
+                                <p className="text-xs text-slate-400">{a.payment?.payment_method} {a.payment?.reference_number ? `• Ref: ${a.payment.reference_number}` : ""}</p>
+                              </div>
+                              <p className="font-bold text-emerald-600 text-sm">{LKR(a.allocated_amount)}</p>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 space-y-1">
+                          <div className="flex justify-between text-sm">
+                            <span className="text-slate-500">Total allocated:</span>
+                            <span className="font-bold text-emerald-600">{LKR(totalAllocated)}</span>
+                          </div>
+                          {!fullyPaid && (
+                            <div className="flex justify-between text-sm">
+                              <span className="text-slate-500">Still owing:</span>
+                              <span className="font-bold text-red-600">{LKR(remainingAfterAlloc)}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-center">
+                        <p className="text-sm text-slate-500">No payments allocated to this invoice yet</p>
+                        <p className="text-xs text-slate-400 mt-1">Payments recorded with FIFO will automatically allocate here</p>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {p.notes && (
                 <div>
@@ -1668,11 +1833,16 @@ function Purchases({ suppliers, products, purchases, purchaseItems, getOutstandi
 // ═══════════════════════════════════════
 //  PAYMENTS
 // ═══════════════════════════════════════
-function Payments({ suppliers, payments, getOutstanding, notify, askConfirm, refreshAll }) {
+function Payments({ suppliers, payments, paymentAllocations, getOutstanding, notify, askConfirm, refreshAll, computeFifoPreview, getPaymentAllocations, getUnpaidInvoices, purchases }) {
   const [showForm, setShowForm] = useState(false);
   const [search, setSearch] = useState("");
   const [form, setForm] = useState({ supplier_id: "", amount: "", payment_date: today(), payment_method: "Cash", reference_number: "", notes: "" });
   const [editing, setEditing] = useState(null);
+  const [fifoPreview, setFifoPreview] = useState(null);
+  const [expandedPayment, setExpandedPayment] = useState(null);
+  const [allocMode, setAllocMode] = useState("auto"); // "auto" = FIFO, "manual" = pick invoices
+  const [manualAllocs, setManualAllocs] = useState([]); // [{purchase_id, allocated_amount, ...invoiceInfo}]
+  const [unpaidInvoices, setUnpaidInvoices] = useState([]);
 
   const methods = ["Cash", "Bank Transfer", "Cheque", "Other"];
   const activeSuppliers = suppliers.data.filter(s => s.is_active);
@@ -1682,25 +1852,118 @@ function Payments({ suppliers, payments, getOutstanding, notify, askConfirm, ref
     return !search || (supp?.name || "").toLowerCase().includes(search.toLowerCase());
   }).sort((a, b) => b.payment_date.localeCompare(a.payment_date));
 
-  const openNew = () => { setForm({ supplier_id: "", amount: "", payment_date: today(), payment_method: "Cash", reference_number: "", notes: "" }); setEditing(null); setShowForm(true); };
+  const openNew = () => {
+    setForm({ supplier_id: "", amount: "", payment_date: today(), payment_method: "Cash", reference_number: "", notes: "" });
+    setEditing(null); setFifoPreview(null); setAllocMode("auto"); setManualAllocs([]); setUnpaidInvoices([]); setShowForm(true);
+  };
+
+  // Update FIFO preview when supplier or amount changes (auto mode)
+  const updatePreview = (suppId, amount, editId = null) => {
+    if (suppId && amount && parseFloat(amount) > 0) {
+      setFifoPreview(computeFifoPreview(suppId, amount, editId));
+    } else {
+      setFifoPreview(null);
+    }
+  };
+
+  // Load unpaid invoices when supplier changes (for manual mode)
+  const loadUnpaidInvoices = (suppId, editId = null) => {
+    setUnpaidInvoices(suppId ? getUnpaidInvoices(suppId, editId) : []);
+  };
+
+  const handleSupplierChange = (suppId) => {
+    setForm(f => ({ ...f, supplier_id: suppId }));
+    updatePreview(suppId, form.amount, editing);
+    loadUnpaidInvoices(suppId, editing);
+    setManualAllocs([]);
+  };
+
+  const handleAmountChange = (amount) => {
+    setForm(f => ({ ...f, amount }));
+    if (allocMode === "auto") updatePreview(form.supplier_id, amount, editing);
+  };
+
+  const handleModeChange = (mode) => {
+    setAllocMode(mode);
+    if (mode === "auto") {
+      updatePreview(form.supplier_id, form.amount, editing);
+      setManualAllocs([]);
+    } else {
+      setFifoPreview(null);
+    }
+  };
+
+  // Manual mode: toggle an invoice on/off
+  const toggleManualInvoice = (inv) => {
+    const exists = manualAllocs.find(a => a.purchase_id === inv.purchase_id);
+    if (exists) {
+      setManualAllocs(manualAllocs.filter(a => a.purchase_id !== inv.purchase_id));
+    } else {
+      setManualAllocs([...manualAllocs, {
+        purchase_id: inv.purchase_id,
+        invoice_number: inv.invoice_number,
+        invoice_date: inv.invoice_date,
+        invoice_total: inv.invoice_total,
+        remaining_before: inv.remaining,
+        allocated_amount: inv.remaining,
+      }]);
+    }
+  };
+
+  // Manual mode: update amount for a specific invoice
+  const updateManualAmount = (purchaseId, amount) => {
+    const inv = unpaidInvoices.find(i => i.purchase_id === purchaseId);
+    const capped = Math.min(parseFloat(amount) || 0, inv?.remaining || 0);
+    setManualAllocs(manualAllocs.map(a =>
+      a.purchase_id === purchaseId ? { ...a, allocated_amount: Math.round(capped * 100) / 100 } : a
+    ));
+  };
+
+  const manualTotal = manualAllocs.reduce((s, a) => s + a.allocated_amount, 0);
+
+  // Build final allocations based on mode
+  const getFinalAllocations = () => {
+    if (allocMode === "auto" && fifoPreview) {
+      return fifoPreview.allocations.map(a => ({ purchase_id: a.purchase_id, allocated_amount: a.allocated_amount }));
+    } else if (allocMode === "manual") {
+      return manualAllocs.filter(a => a.allocated_amount > 0).map(a => ({ purchase_id: a.purchase_id, allocated_amount: a.allocated_amount }));
+    }
+    return [];
+  };
 
   const handleSave = async () => {
     if (!form.supplier_id) return notify("Select a supplier", "error");
     if (!form.amount || parseFloat(form.amount) <= 0) return notify("Enter valid amount", "error");
 
+    const paymentAmount = parseFloat(form.amount);
+    const finalAllocs = getFinalAllocations();
+
+    if (allocMode === "manual" && manualTotal > paymentAmount + 0.01) {
+      return notify("Allocated total exceeds payment amount!", "error");
+    }
+
     if (editing) {
-      payments.update(editing, { ...form, amount: parseFloat(form.amount) });
+      await payments.update(editing, { ...form, amount: paymentAmount });
+      await sbDelete("payment_allocations", "payment_id=eq." + editing);
+      if (finalAllocs.length > 0) {
+        await sbInsert("payment_allocations", finalAllocs.map(a => ({ payment_id: editing, purchase_id: a.purchase_id, supplier_id: form.supplier_id, allocated_amount: a.allocated_amount })));
+      }
       notify("Payment updated");
     } else {
-      payments.add({ id: genId(), ...form, amount: parseFloat(form.amount), created_at: today() });
+      const result = await payments.add({ id: genId(), ...form, amount: paymentAmount, created_at: today() });
+      if (result && result.id && finalAllocs.length > 0) {
+        await sbInsert("payment_allocations", finalAllocs.map(a => ({ payment_id: result.id, purchase_id: a.purchase_id, supplier_id: form.supplier_id, allocated_amount: a.allocated_amount })));
+      }
       notify("Payment recorded");
     }
-    setShowForm(false); refreshAll();
+    setShowForm(false); setFifoPreview(null); setManualAllocs([]); await refreshAll();
   };
 
   const handleDelete = (p) => {
-    askConfirm("Delete Payment?", "Are you sure? This will affect the supplier's outstanding balance.", () => {
-      payments.remove(p.id); refreshAll(); notify("Payment deleted");
+    askConfirm("Delete Payment?", "This will remove the payment and its invoice allocations.", async () => {
+      await sbDelete("payment_allocations", "payment_id=eq." + p.id);
+      await payments.remove(p.id);
+      await refreshAll(); notify("Payment deleted");
     }, true);
   };
 
@@ -1717,19 +1980,51 @@ function Payments({ suppliers, payments, getOutstanding, notify, askConfirm, ref
       <div className="space-y-3">
         {filteredPayments.length ? filteredPayments.map(p => {
           const supp = suppliers.data.find(s => s.id === p.supplier_id);
+          const allocs = getPaymentAllocations(p.id);
+          const isExpanded = expandedPayment === p.id;
           return (
-            <div key={p.id} className="bg-white rounded-xl border border-slate-200 p-4 hover:shadow-md transition">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="font-bold text-lg text-slate-800">{supp?.name || "Unknown"}</p>
-                  <p className="text-sm text-slate-500">{fmtDate(p.payment_date)} • {p.payment_method}</p>
-                  {p.reference_number && <p className="text-xs text-slate-400">Ref: {p.reference_number}</p>}
-                  {p.notes && <p className="text-xs text-slate-400 mt-1">📝 {p.notes}</p>}
+            <div key={p.id} className="bg-white rounded-xl border border-slate-200 hover:shadow-md transition">
+              <div className="p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="font-bold text-lg text-slate-800">{supp?.name || "Unknown"}</p>
+                    <p className="text-sm text-slate-500">{fmtDate(p.payment_date)} • {p.payment_method}</p>
+                    {p.reference_number && <p className="text-xs text-slate-400">Ref: {p.reference_number}</p>}
+                    {p.notes && <p className="text-xs text-slate-400 mt-1">📝 {p.notes}</p>}
+                  </div>
+                  <p className="font-extrabold text-xl text-emerald-600">{LKR(p.amount)}</p>
                 </div>
-                <p className="font-extrabold text-xl text-emerald-600">{LKR(p.amount)}</p>
+                {allocs.length > 0 && (
+                  <button onClick={() => setExpandedPayment(isExpanded ? null : p.id)}
+                    className="mt-2 flex items-center gap-1.5 text-xs font-semibold text-blue-600 bg-blue-50 px-3 py-1.5 rounded-lg hover:bg-blue-100 transition">
+                    <Icon name="check" size={12} color="#2563eb" />
+                    Settled {allocs.length} invoice{allocs.length !== 1 ? "s" : ""}
+                    <Icon name={isExpanded ? "x" : "down"} size={12} color="#2563eb" />
+                  </button>
+                )}
+                {allocs.length === 0 && (
+                  <p className="mt-2 text-xs text-amber-600 bg-amber-50 px-3 py-1.5 rounded-lg inline-block font-medium">⚠ No allocation (legacy payment)</p>
+                )}
+                {isExpanded && allocs.length > 0 && (
+                  <div className="mt-3 bg-slate-50 rounded-xl p-3 space-y-2">
+                    <p className="text-xs font-bold text-slate-500 uppercase tracking-wide">Allocation Breakdown</p>
+                    {allocs.map((a, i) => (
+                      <div key={i} className="flex items-center justify-between bg-white rounded-lg px-3 py-2 border border-slate-100">
+                        <div>
+                          <p className="text-sm font-semibold text-slate-700">Invoice #{a.purchase?.invoice_number || "N/A"}</p>
+                          <p className="text-xs text-slate-400">{fmtDate(a.purchase?.invoice_date)} • Total: {LKR(a.purchase?.total_amount)}</p>
+                        </div>
+                        <p className="font-bold text-emerald-600 text-sm">{LKR(a.allocated_amount)}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
-              <div className="flex gap-2 mt-3 pt-3 border-t border-slate-100">
-                <button onClick={() => { setForm({ ...p, amount: String(p.amount) }); setEditing(p.id); setShowForm(true); }}
+              <div className="flex gap-2 px-4 pb-4 pt-1 border-t border-slate-100 mt-1">
+                <button onClick={() => {
+                  setForm({ ...p, amount: String(p.amount) }); setEditing(p.id); setAllocMode("auto"); setManualAllocs([]);
+                  setShowForm(true); updatePreview(p.supplier_id, String(p.amount), p.id); loadUnpaidInvoices(p.supplier_id, p.id);
+                }}
                   className="flex items-center gap-1.5 px-4 py-2.5 text-sm text-slate-600 bg-slate-100 rounded-lg hover:bg-slate-200 transition">
                   <Icon name="edit" size={14} /> Edit
                 </button>
@@ -1744,11 +2039,12 @@ function Payments({ suppliers, payments, getOutstanding, notify, askConfirm, ref
       </div>
 
       {showForm && (
-        <Modal title={editing ? "Edit Payment" : "New Payment"} onClose={() => setShowForm(false)}>
+        <Modal title={editing ? "Edit Payment" : "New Payment"} onClose={() => { setShowForm(false); setFifoPreview(null); setManualAllocs([]); }}>
           <div className="space-y-4">
+            {/* Supplier */}
             <div>
               <label className="block text-sm font-semibold text-slate-700 mb-1">Supplier *</label>
-              <select value={form.supplier_id} onChange={e => setForm({ ...form, supplier_id: e.target.value })}
+              <select value={form.supplier_id} onChange={e => handleSupplierChange(e.target.value)}
                 className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 focus:border-blue-500 outline-none text-lg bg-white">
                 <option value="">Select supplier...</option>
                 {activeSuppliers.map(s => <option key={s.id} value={s.id}>{s.name} (Owes: {LKR(getOutstanding(s.id))})</option>)}
@@ -1760,11 +2056,166 @@ function Payments({ suppliers, payments, getOutstanding, notify, askConfirm, ref
                 <span className="font-bold text-red-700">{LKR(getOutstanding(form.supplier_id))}</span>
               </div>
             )}
+
+            {/* ── Allocation Mode Toggle ── */}
+            {form.supplier_id && (
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-2">Allocation Method</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button onClick={() => handleModeChange("auto")}
+                    className={`py-3 px-3 rounded-xl border-2 font-semibold transition text-sm ${allocMode === "auto" ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-600 hover:border-slate-300"}`}>
+                    🔄 Auto (FIFO)
+                  </button>
+                  <button onClick={() => handleModeChange("manual")}
+                    className={`py-3 px-3 rounded-xl border-2 font-semibold transition text-sm ${allocMode === "manual" ? "border-violet-500 bg-violet-50 text-violet-700" : "border-slate-200 text-slate-600 hover:border-slate-300"}`}>
+                    ✋ Pick Invoices
+                  </button>
+                </div>
+                <p className="text-xs text-slate-400 mt-1.5">
+                  {allocMode === "auto" ? "Payment settles oldest invoices first" : "Choose which invoice(s) this payment is for"}
+                </p>
+              </div>
+            )}
+
+            {/* ── Manual Mode: Invoice Picker ── */}
+            {allocMode === "manual" && form.supplier_id && (
+              <div className="space-y-3">
+                <label className="block text-sm font-semibold text-slate-700">Select Invoice(s) to Pay</label>
+                {unpaidInvoices.length > 0 ? (
+                  <div className="space-y-2 max-h-[300px] overflow-y-auto">
+                    {unpaidInvoices.map(inv => {
+                      const selected = manualAllocs.find(a => a.purchase_id === inv.purchase_id);
+                      return (
+                        <div key={inv.purchase_id}
+                          className={`rounded-xl border-2 transition ${selected ? "border-violet-400 bg-violet-50" : "border-slate-200 bg-white hover:border-slate-300"}`}>
+                          <button onClick={() => toggleManualInvoice(inv)}
+                            className="w-full text-left p-3 flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                              <div className={`w-6 h-6 rounded-lg border-2 flex items-center justify-center flex-shrink-0 transition ${selected ? "bg-violet-600 border-violet-600" : "border-slate-300"}`}>
+                                {selected && <Icon name="check" size={14} color="white" />}
+                              </div>
+                              <div>
+                                <p className="font-semibold text-sm text-slate-700">Invoice #{inv.invoice_number}</p>
+                                <p className="text-xs text-slate-400">{fmtDate(inv.invoice_date)} • Total: {shortLKR(inv.invoice_total)}</p>
+                              </div>
+                            </div>
+                            <div className="text-right">
+                              <p className="font-bold text-red-600 text-sm">{LKR(inv.remaining)}</p>
+                              <p className="text-xs text-slate-400">owing</p>
+                            </div>
+                          </button>
+                          {selected && (
+                            <div className="px-3 pb-3 pt-1 border-t border-violet-200">
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-semibold text-slate-500 whitespace-nowrap">Pay:</span>
+                                <input type="number" value={selected.allocated_amount || ""}
+                                  onChange={e => updateManualAmount(inv.purchase_id, e.target.value)}
+                                  className="flex-1 px-3 py-2 rounded-lg border-2 border-violet-300 focus:border-violet-500 outline-none text-sm font-bold text-center"
+                                  max={inv.remaining} min={0} step="0.01" />
+                                <button onClick={() => updateManualAmount(inv.purchase_id, inv.remaining)}
+                                  className="text-xs text-violet-600 font-semibold bg-violet-100 px-2 py-1.5 rounded-lg hover:bg-violet-200 transition whitespace-nowrap">
+                                  Full
+                                </button>
+                              </div>
+                              {selected.allocated_amount < inv.remaining && selected.allocated_amount > 0 && (
+                                <p className="text-xs text-slate-400 mt-1 text-center">
+                                  Remaining after: {LKR(Math.round((inv.remaining - selected.allocated_amount) * 100) / 100)}
+                                </p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-center">
+                    <p className="text-sm text-slate-500">No unpaid credit invoices for this supplier</p>
+                  </div>
+                )}
+                {manualAllocs.length > 0 && (
+                  <div className="bg-violet-50 border border-violet-200 rounded-xl p-3 space-y-2">
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm font-semibold text-slate-600">Total to allocate:</span>
+                      <span className="font-extrabold text-violet-700">{LKR(manualTotal)}</span>
+                    </div>
+                    {!form.amount && manualTotal > 0 && (
+                      <button onClick={() => setForm(f => ({ ...f, amount: String(manualTotal) }))}
+                        className="w-full py-2 bg-violet-600 text-white rounded-lg text-sm font-bold hover:bg-violet-700 transition">
+                        Set payment amount to {LKR(manualTotal)}
+                      </button>
+                    )}
+                    {form.amount && Math.abs(parseFloat(form.amount) - manualTotal) > 0.01 && parseFloat(form.amount) > 0 && (
+                      <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                        ⚠ Payment ({LKR(form.amount)}) differs from allocation ({LKR(manualTotal)}).
+                        {parseFloat(form.amount) > manualTotal
+                          ? ` ${LKR(parseFloat(form.amount) - manualTotal)} unallocated.`
+                          : " Allocation exceeds payment — please adjust."}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Amount */}
             <div>
               <label className="block text-sm font-semibold text-slate-700 mb-1">Amount (LKR) *</label>
-              <input type="number" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })}
+              <input type="number" value={form.amount} onChange={e => handleAmountChange(e.target.value)}
                 className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 focus:border-blue-500 outline-none text-2xl font-bold text-center" placeholder="0.00" />
             </div>
+
+            {/* ── FIFO Preview (auto mode only) ── */}
+            {allocMode === "auto" && fifoPreview && fifoPreview.allocations.length > 0 && (
+              <div className="bg-gradient-to-br from-blue-50 to-emerald-50 rounded-2xl border-2 border-blue-200 p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center">
+                    <Icon name="check" size={16} color="white" />
+                  </div>
+                  <div>
+                    <p className="font-bold text-slate-800">FIFO Allocation Preview</p>
+                    <p className="text-xs text-slate-500">Payment will settle invoices oldest-first</p>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  {fifoPreview.allocations.map((a, i) => (
+                    <div key={i} className={`rounded-xl p-3 border ${a.fully_settled ? "bg-emerald-50 border-emerald-200" : "bg-white border-slate-200"}`}>
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="font-semibold text-sm text-slate-700">
+                            {a.fully_settled && <span className="text-emerald-600">✓ </span>}
+                            Invoice #{a.invoice_number}
+                          </p>
+                          <p className="text-xs text-slate-400">{fmtDate(a.invoice_date)} • Owed: {shortLKR(a.remaining_before)}</p>
+                        </div>
+                        <div className="text-right">
+                          <p className="font-bold text-emerald-600 text-sm">−{shortLKR(a.allocated_amount)}</p>
+                          {a.fully_settled
+                            ? <p className="text-xs text-emerald-600 font-semibold">FULLY PAID</p>
+                            : <p className="text-xs text-slate-400">Left: {shortLKR(a.remaining_after)}</p>}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="border-t border-blue-200 pt-3 flex justify-between items-center">
+                  <span className="text-sm font-semibold text-slate-600">Total allocated:</span>
+                  <span className="font-extrabold text-emerald-700">{LKR(fifoPreview.totalAllocated)}</span>
+                </div>
+                {fifoPreview.unallocated > 0 && (
+                  <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+                    <p className="text-sm text-amber-700 font-medium">⚠ {LKR(fifoPreview.unallocated)} excess — no more unpaid invoices</p>
+                  </div>
+                )}
+              </div>
+            )}
+            {allocMode === "auto" && form.supplier_id && form.amount && parseFloat(form.amount) > 0 && fifoPreview && fifoPreview.allocations.length === 0 && (
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-center">
+                <p className="text-sm text-amber-700 font-medium">No unpaid credit invoices found</p>
+              </div>
+            )}
+
+            {/* Date, Method, Ref, Notes */}
             <div>
               <label className="block text-sm font-semibold text-slate-700 mb-1">Date</label>
               <input type="date" value={form.payment_date} onChange={e => setForm({ ...form, payment_date: e.target.value })}
@@ -1789,8 +2240,13 @@ function Payments({ suppliers, payments, getOutstanding, notify, askConfirm, ref
               <textarea value={form.notes || ""} onChange={e => setForm({ ...form, notes: e.target.value })}
                 className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 focus:border-blue-500 outline-none" rows={2} />
             </div>
+
+            {/* Save Button */}
             <button onClick={handleSave} className="w-full py-4 bg-emerald-600 text-white rounded-xl font-bold text-lg hover:bg-emerald-700 transition">
-              {editing ? "Update Payment" : "Record Payment"}
+              {editing ? "Update Payment" : (() => {
+                const count = allocMode === "auto" ? (fifoPreview?.allocations?.length || 0) : manualAllocs.filter(a => a.allocated_amount > 0).length;
+                return count > 0 ? `Record Payment & Settle ${count} Invoice${count > 1 ? "s" : ""}` : "Record Payment";
+              })()}
             </button>
           </div>
         </Modal>
@@ -2072,7 +2528,7 @@ function PriceCheck({ products, purchaseItems, purchases, suppliers, getLastPric
 // ═══════════════════════════════════════
 //  REPORTS
 // ═══════════════════════════════════════
-function Reports({ suppliers, products, purchases, purchaseItems, payments, returns, returnItems, getOutstanding }) {
+function Reports({ suppliers, products, purchases, purchaseItems, payments, returns, returnItems, getOutstanding, paymentAllocations }) {
   const [report, setReport] = useState(null);
   const [filterSupplier, setFilterSupplier] = useState("");
   const [dateFrom, setDateFrom] = useState("");
@@ -2118,7 +2574,16 @@ function Reports({ suppliers, products, purchases, purchaseItems, payments, retu
           }
         });
         payments.data.filter(p => p.supplier_id === filterSupplier).forEach(p => {
-          ledger.push({ date: p.payment_date, type: "Payment", desc: `${p.payment_method} ${p.reference_number || ""}`, debit: 0, credit: p.amount });
+          const allocs = paymentAllocations.data.filter(a => a.payment_id === p.id);
+          let desc = `${p.payment_method} ${p.reference_number || ""}`;
+          if (allocs.length > 0) {
+            const invoiceRefs = allocs.map(a => {
+              const inv = purchases.data.find(pu => pu.id === a.purchase_id);
+              return `#${inv?.invoice_number || "N/A"} (${shortLKR(a.allocated_amount)})`;
+            }).join(", ");
+            desc += ` → ${invoiceRefs}`;
+          }
+          ledger.push({ date: p.payment_date, type: "Payment", desc, debit: 0, credit: p.amount });
         });
         returns.data.filter(r => r.supplier_id === filterSupplier).forEach(r => {
           ledger.push({ date: r.return_date, type: "Return", desc: r.reason || "Goods returned", debit: 0, credit: r.total_amount });
