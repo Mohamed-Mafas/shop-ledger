@@ -2086,8 +2086,6 @@ function Payments({ suppliers, payments, paymentAllocations, getOutstanding, not
                   <div className="space-y-2 max-h-[400px] overflow-y-auto">
                     {unpaidInvoices.map(inv => {
                       const selected = manualAllocs.find(a => a.purchase_id === inv.purchase_id);
-                      const isPreviewing = previewInvoiceId === inv.purchase_id;
-                      const invItems = purchaseItems.data.filter(i => i.purchase_id === inv.purchase_id);
                       return (
                         <div key={inv.purchase_id}
                           className={`rounded-xl border-2 transition ${selected ? "border-violet-400 bg-violet-50" : "border-slate-200 bg-white hover:border-slate-300"}`}>
@@ -2106,38 +2104,12 @@ function Payments({ suppliers, payments, paymentAllocations, getOutstanding, not
                                 <p className="text-xs text-slate-400">owing</p>
                               </div>
                             </button>
-                            <button onClick={(e) => { e.stopPropagation(); setPreviewInvoiceId(isPreviewing ? null : inv.purchase_id); }}
-                              className={`mr-2 w-9 h-9 flex items-center justify-center rounded-lg transition flex-shrink-0 ${isPreviewing ? "bg-blue-100 text-blue-600" : "bg-slate-100 text-slate-400 hover:bg-slate-200 hover:text-slate-600"}`}
-                              title="View invoice items">
+                            <button onClick={(e) => { e.stopPropagation(); setPreviewInvoiceId(inv.purchase_id); }}
+                              className="mr-2 w-9 h-9 flex items-center justify-center rounded-lg transition flex-shrink-0 bg-slate-100 text-slate-400 hover:bg-blue-100 hover:text-blue-600"
+                              title="View invoice details">
                               <Icon name="eye" size={16} />
                             </button>
                           </div>
-                          {/* Invoice Items Preview */}
-                          {isPreviewing && (
-                            <div className="mx-3 mb-3 bg-white border border-slate-200 rounded-lg overflow-hidden">
-                              <div className="bg-slate-100 px-3 py-1.5 flex justify-between text-xs font-semibold text-slate-500">
-                                <span>Item</span><span>Amount</span>
-                              </div>
-                              {invItems.length > 0 ? invItems.map((item, idx) => {
-                                const prodName = products.data.find(p => p.id === item.product_id)?.name || item.product_name || "Item";
-                                return (
-                                  <div key={idx} className="px-3 py-2 flex justify-between items-center border-t border-slate-100 text-xs">
-                                    <div>
-                                      <p className="font-medium text-slate-700">{prodName}</p>
-                                      <p className="text-slate-400">{item.quantity} {item.unit} × {shortLKR(item.unit_price)}/{item.price_label || item.unit}</p>
-                                    </div>
-                                    <p className="font-bold text-slate-700">{shortLKR(item.line_total)}</p>
-                                  </div>
-                                );
-                              }) : (
-                                <p className="px-3 py-2 text-xs text-slate-400 text-center">No items found</p>
-                              )}
-                              <div className="px-3 py-2 bg-blue-50 border-t border-blue-200 flex justify-between text-xs font-bold">
-                                <span className="text-slate-600">Invoice Total</span>
-                                <span className="text-blue-700">{LKR(inv.invoice_total)}</span>
-                              </div>
-                            </div>
-                          )}
                           {selected && (
                             <div className="px-3 pb-3 pt-1 border-t border-violet-200">
                               <div className="flex items-center gap-2">
@@ -2212,10 +2184,7 @@ function Payments({ suppliers, payments, paymentAllocations, getOutstanding, not
                   </div>
                 </div>
                 <div className="space-y-2">
-                  {fifoPreview.allocations.map((a, i) => {
-                    const isPreviewing = previewInvoiceId === a.purchase_id;
-                    const invItems = purchaseItems.data.filter(it => it.purchase_id === a.purchase_id);
-                    return (
+                  {fifoPreview.allocations.map((a, i) => (
                     <div key={i} className={`rounded-xl border ${a.fully_settled ? "bg-emerald-50 border-emerald-200" : "bg-white border-slate-200"}`}>
                       <div className="flex items-center p-3">
                         <div className="flex-1 min-w-0">
@@ -2231,34 +2200,14 @@ function Payments({ suppliers, payments, paymentAllocations, getOutstanding, not
                             ? <p className="text-xs text-emerald-600 font-semibold">FULLY PAID</p>
                             : <p className="text-xs text-slate-400">Left: {shortLKR(a.remaining_after)}</p>}
                         </div>
-                        <button onClick={() => setPreviewInvoiceId(isPreviewing ? null : a.purchase_id)}
-                          className={`w-8 h-8 flex items-center justify-center rounded-lg transition flex-shrink-0 ${isPreviewing ? "bg-blue-100 text-blue-600" : "bg-slate-100 text-slate-400 hover:bg-slate-200"}`}
-                          title="View invoice items">
+                        <button onClick={() => setPreviewInvoiceId(a.purchase_id)}
+                          className="w-8 h-8 flex items-center justify-center rounded-lg transition flex-shrink-0 bg-slate-100 text-slate-400 hover:bg-blue-100 hover:text-blue-600"
+                          title="View invoice details">
                           <Icon name="eye" size={14} />
                         </button>
                       </div>
-                      {isPreviewing && (
-                        <div className="mx-3 mb-3 bg-white border border-slate-200 rounded-lg overflow-hidden">
-                          <div className="bg-slate-100 px-3 py-1.5 flex justify-between text-xs font-semibold text-slate-500">
-                            <span>Item</span><span>Amount</span>
-                          </div>
-                          {invItems.length > 0 ? invItems.map((item, idx) => {
-                            const prodName = products.data.find(p => p.id === item.product_id)?.name || item.product_name || "Item";
-                            return (
-                              <div key={idx} className="px-3 py-2 flex justify-between items-center border-t border-slate-100 text-xs">
-                                <div>
-                                  <p className="font-medium text-slate-700">{prodName}</p>
-                                  <p className="text-slate-400">{item.quantity} {item.unit} × {shortLKR(item.unit_price)}/{item.price_label || item.unit}</p>
-                                </div>
-                                <p className="font-bold text-slate-700">{shortLKR(item.line_total)}</p>
-                              </div>
-                            );
-                          }) : <p className="px-3 py-2 text-xs text-slate-400 text-center">No items found</p>}
-                        </div>
-                      )}
                     </div>
-                    );
-                  })}
+                  ))}
                 </div>
                 <div className="border-t border-blue-200 pt-3 flex justify-between items-center">
                   <span className="text-sm font-semibold text-slate-600">Total allocated:</span>
@@ -2313,6 +2262,104 @@ function Payments({ suppliers, payments, paymentAllocations, getOutstanding, not
           </div>
         </Modal>
       )}
+
+      {/* Invoice Preview Modal — opens on eye icon tap */}
+      {previewInvoiceId && (() => {
+        const purch = purchases.data.find(p => p.id === previewInvoiceId);
+        if (!purch) { setPreviewInvoiceId(null); return null; }
+        const supp = suppliers.data.find(s => s.id === purch.supplier_id);
+        const pItems = purchaseItems.data.filter(i => i.purchase_id === purch.id);
+        return (
+          <div className="fixed inset-0 z-[950] bg-black/50 flex items-center justify-center p-4" onClick={() => setPreviewInvoiceId(null)}>
+            <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center justify-between p-5 border-b border-slate-100">
+                <h2 className="text-xl font-bold text-slate-800">Invoice Details</h2>
+                <button onClick={() => setPreviewInvoiceId(null)} className="w-10 h-10 flex items-center justify-center rounded-full hover:bg-slate-100">
+                  <Icon name="x" />
+                </button>
+              </div>
+              <div className="p-5 space-y-5">
+                {/* Header */}
+                <div className="bg-blue-50 rounded-xl p-4">
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <p className="font-extrabold text-xl text-slate-800">{supp?.name || "Unknown"}</p>
+                      <p className="text-sm text-slate-500 mt-1">{fmtDate(purch.invoice_date)}</p>
+                      {purch.invoice_number && <p className="text-sm text-slate-500">Invoice #: {purch.invoice_number}</p>}
+                    </div>
+                    <div className="text-right">
+                      <p className="text-2xl font-extrabold text-blue-700">{LKR(purch.total_amount)}</p>
+                      <span className={`text-xs font-bold px-2 py-1 rounded-full mt-1 inline-block ${purch.payment_type === "Cash" ? "bg-emerald-100 text-emerald-700" : purch.payment_type === "Credit" ? "bg-red-100 text-red-700" : "bg-amber-100 text-amber-700"}`}>
+                        {purch.payment_type}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Items Table */}
+                <div>
+                  <h4 className="font-bold text-slate-700 mb-2">📦 Items ({pItems.length})</h4>
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                    <div className="bg-slate-100 px-4 py-2 grid grid-cols-12 gap-1 text-xs font-semibold text-slate-500">
+                      <div className="col-span-5">Product</div>
+                      <div className="col-span-2 text-right">Qty</div>
+                      <div className="col-span-2 text-right">Price</div>
+                      <div className="col-span-3 text-right">Amount</div>
+                    </div>
+                    {pItems.map(item => (
+                      <div key={item.id} className="px-4 py-3 grid grid-cols-12 gap-1 text-sm border-t border-slate-100">
+                        <div className="col-span-5 font-medium text-slate-700">
+                          {products.data.find(pr => pr.id === item.product_id)?.name || item.product_name || "Item"}
+                          {item.packing_size && item.price_per === "packing_unit" && (
+                            <span className="block text-xs text-amber-600">{item.quantity} {item.unit} × {item.packing_size} {item.packing_unit}</span>
+                          )}
+                        </div>
+                        <div className="col-span-2 text-right text-slate-600">{item.quantity} {item.unit}</div>
+                        <div className="col-span-2 text-right text-slate-600">{shortLKR(item.unit_price)}/{item.price_label || item.unit}</div>
+                        <div className="col-span-3 text-right font-bold text-blue-600">{LKR(item.line_total)}</div>
+                      </div>
+                    ))}
+                    <div className="px-4 py-3 grid grid-cols-12 gap-1 bg-blue-50 border-t-2 border-blue-200">
+                      <div className="col-span-9 text-right font-bold text-slate-700">Total:</div>
+                      <div className="col-span-3 text-right font-extrabold text-blue-700 text-lg">{LKR(purch.total_amount)}</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Payment Info */}
+                <div>
+                  <h4 className="font-bold text-slate-700 mb-2">💳 Payment</h4>
+                  <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-2">
+                    <div className="flex justify-between"><span className="text-slate-500">Type:</span><span className="font-semibold">{purch.payment_type}</span></div>
+                    <div className="flex justify-between"><span className="text-slate-500">Invoice Total:</span><span className="font-semibold">{LKR(purch.total_amount)}</span></div>
+                    {purch.payment_type === "Partial" && (
+                      <div className="flex justify-between"><span className="text-slate-500">Paid at purchase:</span><span className="font-semibold text-emerald-600">{LKR(purch.amount_paid)}</span></div>
+                    )}
+                    {(purch.payment_type === "Credit" || purch.payment_type === "Partial") && (
+                      <div className="flex justify-between border-t border-slate-100 pt-2">
+                        <span className="text-slate-500 font-semibold">Credit Amount:</span>
+                        <span className="font-extrabold text-red-600">{LKR(purch.total_amount - (purch.amount_paid || 0))}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {purch.notes && (
+                  <div>
+                    <h4 className="font-bold text-slate-700 mb-2">📝 Notes</h4>
+                    <p className="text-sm text-slate-600 bg-slate-50 rounded-xl p-4">{purch.notes}</p>
+                  </div>
+                )}
+
+                <button onClick={() => setPreviewInvoiceId(null)}
+                  className="w-full py-3 bg-slate-100 text-slate-700 rounded-xl font-bold text-base hover:bg-slate-200 transition">
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
