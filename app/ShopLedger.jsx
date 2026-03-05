@@ -671,6 +671,7 @@ function Suppliers({ suppliers, getOutstanding, notify, askConfirm, purchases, p
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({ name: "", phone: "", address: "", notes: "" });
   const [viewSupplier, setViewSupplier] = useState(null);
+  const [viewInvoice, setViewInvoice] = useState(null);
 
   const filtered = suppliers.data.filter(s => s.is_active && s.name.toLowerCase().includes(search.toLowerCase()));
 
@@ -777,31 +778,15 @@ function Suppliers({ suppliers, getOutstanding, notify, askConfirm, purchases, p
                   <h4 className="font-bold text-slate-700 mb-2">📦 Purchases ({suppPurchases.length})</h4>
                   {suppPurchases.length ? (
                     <div className="space-y-2 max-h-60 overflow-y-auto">
-                      {suppPurchases.map(p => {
-                        const pItems = purchaseItems.data.filter(i => i.purchase_id === p.id);
-                        return (
-                          <details key={p.id} className="bg-white border border-slate-200 rounded-xl">
-                            <summary className="flex justify-between items-center p-3 cursor-pointer hover:bg-slate-50 rounded-xl list-none">
-                              <div className="flex-1">
-                                <p className="font-semibold text-slate-700">{fmtDate(p.invoice_date)} {p.invoice_number ? `• #${p.invoice_number}` : ""}</p>
-                                <p className="text-xs text-slate-400">{p.payment_type} • {pItems.length} item{pItems.length !== 1 ? "s" : ""}</p>
-                              </div>
-                              <div className="text-right ml-3">
-                                <p className="font-bold text-blue-600">{LKR(p.total_amount)}</p>
-                                <p className="text-xs text-slate-400">Tap to view ▾</p>
-                              </div>
-                            </summary>
-                            <div className="px-3 pb-3 pt-1 border-t border-slate-100 space-y-1">
-                              {pItems.map(item => (
-                                <div key={item.id} className="flex justify-between text-xs text-slate-500 pl-2 border-l-2 border-blue-200">
-                                  <span>{item.product_name || "Item"} × {item.quantity} {item.unit}</span>
-                                  <span>{LKR(item.line_total)}</span>
-                                </div>
-                              ))}
-                            </div>
-                          </details>
-                        );
-                      })}
+                      {suppPurchases.map(p => (
+                        <div key={p.id} onClick={() => setViewInvoice(p)} className="bg-white border border-slate-200 rounded-xl p-3 flex justify-between items-center cursor-pointer hover:bg-blue-50 hover:border-blue-300 transition active:bg-blue-100">
+                          <div>
+                            <p className="font-semibold text-slate-700">{fmtDate(p.invoice_date)} {p.invoice_number ? `• #${p.invoice_number}` : ""}</p>
+                            <p className="text-xs text-slate-400">{p.payment_type}</p>
+                          </div>
+                          <p className="font-bold text-blue-600">{LKR(p.total_amount)}</p>
+                        </div>
+                      ))}
                     </div>
                   ) : <p className="text-sm text-slate-400">No purchases yet</p>}
                 </div>
@@ -846,6 +831,63 @@ function Suppliers({ suppliers, getOutstanding, notify, askConfirm, purchases, p
           })()}
         </Modal>
       )}
+
+      {viewInvoice && (() => {
+        const p = viewInvoice;
+        const supp = suppliers.data.find(s => s.id === p.supplier_id);
+        const pItems = purchaseItems.data.filter(i => i.purchase_id === p.id);
+        return (
+          <Modal title="Invoice Details" onClose={() => setViewInvoice(null)} wide>
+            <div className="space-y-5">
+              <div className="bg-blue-50 rounded-xl p-4">
+                <div className="flex justify-between items-start">
+                  <div>
+                    <p className="font-extrabold text-xl text-slate-800">{supp?.name}</p>
+                    <p className="text-sm text-slate-500 mt-1">{fmtDate(p.invoice_date)}</p>
+                    {p.invoice_number && <p className="text-sm text-slate-500">Invoice #: {p.invoice_number}</p>}
+                  </div>
+                  <div className="text-right">
+                    <p className="text-2xl font-extrabold text-blue-700">{LKR(p.total_amount)}</p>
+                    <span className={`text-xs font-bold px-2 py-1 rounded-full mt-1 inline-block ${p.payment_type === "Cash" ? "bg-emerald-100 text-emerald-700" : p.payment_type === "Credit" ? "bg-red-100 text-red-700" : "bg-amber-100 text-amber-700"}`}>{p.payment_type}</span>
+                  </div>
+                </div>
+              </div>
+              <div>
+                <h4 className="font-bold text-slate-700 mb-2">📦 Items ({pItems.length})</h4>
+                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                  <div className="grid grid-cols-4 gap-2 px-4 py-2 bg-slate-50 text-xs font-semibold text-slate-500">
+                    <span>Product</span><span className="text-center">Qty</span><span className="text-center">Price</span><span className="text-right">Amount</span>
+                  </div>
+                  {pItems.map(item => (
+                    <div key={item.id} className="grid grid-cols-4 gap-2 px-4 py-3 border-t border-slate-100 items-center">
+                      <div><p className="font-medium text-slate-700 text-sm">{item.product_name}</p>{item.packing_size && item.price_per === "packing_unit" && <p className="text-xs text-amber-600">{item.quantity} {item.unit} × {item.packing_size} {item.packing_unit}</p>}</div>
+                      <p className="text-center text-sm text-slate-600">{item.quantity} {item.unit}</p>
+                      <p className="text-center text-sm text-slate-600">{shortLKR(item.unit_price)}/{item.price_label || item.unit}</p>
+                      <p className="text-right font-bold text-blue-600 text-sm">{LKR(item.line_total)}</p>
+                    </div>
+                  ))}
+                  <div className="grid grid-cols-4 gap-2 px-4 py-3 bg-blue-50 border-t-2 border-blue-200">
+                    <span className="col-span-3 font-bold text-right">Total:</span>
+                    <span className="font-extrabold text-blue-700 text-right text-lg">{LKR(p.total_amount)}</span>
+                  </div>
+                </div>
+              </div>
+              {(p.payment_type === "Credit" || p.payment_type === "Partial") && (
+                <div>
+                  <h4 className="font-bold text-slate-700 mb-2">💳 Payment</h4>
+                  <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-2">
+                    <div className="flex justify-between"><span className="text-slate-500">Type:</span><span className="font-semibold">{p.payment_type}</span></div>
+                    <div className="flex justify-between"><span className="text-slate-500">Invoice Total:</span><span className="font-semibold">{LKR(p.total_amount)}</span></div>
+                    {p.amount_paid > 0 && <div className="flex justify-between"><span className="text-slate-500">Paid:</span><span className="font-semibold text-emerald-600">{LKR(p.amount_paid)}</span></div>}
+                    <div className="flex justify-between border-t border-slate-100 pt-2"><span className="text-red-600 font-semibold">Remaining:</span><span className="font-extrabold text-red-600">{LKR(parseFloat(p.total_amount) - (parseFloat(p.amount_paid) || 0))}</span></div>
+                  </div>
+                </div>
+              )}
+              {p.notes && <div className="bg-slate-50 rounded-xl p-3"><p className="text-sm text-slate-600">{p.notes}</p></div>}
+            </div>
+          </Modal>
+        );
+      })()}
 
       {showForm && (
         <Modal title={editing ? "Edit Supplier" : "Add Supplier"} onClose={() => setShowForm(false)}>
