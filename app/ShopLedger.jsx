@@ -535,7 +535,7 @@ export default function ShopLedger() {
           {page === "suppliers" && <Suppliers {...{ suppliers, getOutstanding, notify, askConfirm, purchases, purchaseItems, payments, returns }} />}
           {page === "products" && <Products {...{ products, getLastPrice, notify, askConfirm }} />}
           {page === "purchases" && <Purchases {...{ suppliers, products, purchases, purchaseItems, getOutstanding, getLastPrice, notify, askConfirm, refreshAll, purchaseDraftRef, getInvoiceAllocations, payments }} />}
-          {page === "payments" && <Payments {...{ suppliers, payments, paymentAllocations, getOutstanding, notify, askConfirm, refreshAll, computeFifoPreview, getPaymentAllocations, getUnpaidInvoices, purchases }} />}
+          {page === "payments" && <Payments {...{ suppliers, payments, paymentAllocations, getOutstanding, notify, askConfirm, refreshAll, computeFifoPreview, getPaymentAllocations, getUnpaidInvoices, purchases, purchaseItems, products }} />}
           {page === "returns" && <Returns {...{ suppliers, products, returns, returnItems, getOutstanding, notify, askConfirm, refreshAll }} />}
           {page === "price-check" && <PriceCheck {...{ products, purchaseItems, purchases, suppliers, getLastPrice }} />}
           {page === "reports" && <Reports {...{ suppliers, products, purchases, purchaseItems, payments, returns, returnItems, getOutstanding, paymentAllocations }} />}
@@ -1833,7 +1833,7 @@ function Purchases({ suppliers, products, purchases, purchaseItems, getOutstandi
 // ═══════════════════════════════════════
 //  PAYMENTS
 // ═══════════════════════════════════════
-function Payments({ suppliers, payments, paymentAllocations, getOutstanding, notify, askConfirm, refreshAll, computeFifoPreview, getPaymentAllocations, getUnpaidInvoices, purchases }) {
+function Payments({ suppliers, payments, paymentAllocations, getOutstanding, notify, askConfirm, refreshAll, computeFifoPreview, getPaymentAllocations, getUnpaidInvoices, purchases, purchaseItems, products }) {
   const [showForm, setShowForm] = useState(false);
   const [search, setSearch] = useState("");
   const [form, setForm] = useState({ supplier_id: "", amount: "", payment_date: today(), payment_method: "Cash", reference_number: "", notes: "" });
@@ -1843,6 +1843,7 @@ function Payments({ suppliers, payments, paymentAllocations, getOutstanding, not
   const [allocMode, setAllocMode] = useState("auto"); // "auto" = FIFO, "manual" = pick invoices
   const [manualAllocs, setManualAllocs] = useState([]); // [{purchase_id, allocated_amount, ...invoiceInfo}]
   const [unpaidInvoices, setUnpaidInvoices] = useState([]);
+  const [previewInvoiceId, setPreviewInvoiceId] = useState(null);
 
   const methods = ["Cash", "Bank Transfer", "Cheque", "Other"];
   const activeSuppliers = suppliers.data.filter(s => s.is_active);
@@ -2082,28 +2083,61 @@ function Payments({ suppliers, payments, paymentAllocations, getOutstanding, not
               <div className="space-y-3">
                 <label className="block text-sm font-semibold text-slate-700">Select Invoice(s) to Pay</label>
                 {unpaidInvoices.length > 0 ? (
-                  <div className="space-y-2 max-h-[300px] overflow-y-auto">
+                  <div className="space-y-2 max-h-[400px] overflow-y-auto">
                     {unpaidInvoices.map(inv => {
                       const selected = manualAllocs.find(a => a.purchase_id === inv.purchase_id);
+                      const isPreviewing = previewInvoiceId === inv.purchase_id;
+                      const invItems = purchaseItems.data.filter(i => i.purchase_id === inv.purchase_id);
                       return (
                         <div key={inv.purchase_id}
                           className={`rounded-xl border-2 transition ${selected ? "border-violet-400 bg-violet-50" : "border-slate-200 bg-white hover:border-slate-300"}`}>
-                          <button onClick={() => toggleManualInvoice(inv)}
-                            className="w-full text-left p-3 flex items-center justify-between">
-                            <div className="flex items-center gap-3">
+                          <div className="flex items-center">
+                            <button onClick={() => toggleManualInvoice(inv)}
+                              className="flex-1 text-left p-3 flex items-center gap-3">
                               <div className={`w-6 h-6 rounded-lg border-2 flex items-center justify-center flex-shrink-0 transition ${selected ? "bg-violet-600 border-violet-600" : "border-slate-300"}`}>
                                 {selected && <Icon name="check" size={14} color="white" />}
                               </div>
-                              <div>
+                              <div className="flex-1 min-w-0">
                                 <p className="font-semibold text-sm text-slate-700">Invoice #{inv.invoice_number}</p>
                                 <p className="text-xs text-slate-400">{fmtDate(inv.invoice_date)} • Total: {shortLKR(inv.invoice_total)}</p>
                               </div>
+                              <div className="text-right flex-shrink-0">
+                                <p className="font-bold text-red-600 text-sm">{LKR(inv.remaining)}</p>
+                                <p className="text-xs text-slate-400">owing</p>
+                              </div>
+                            </button>
+                            <button onClick={(e) => { e.stopPropagation(); setPreviewInvoiceId(isPreviewing ? null : inv.purchase_id); }}
+                              className={`mr-2 w-9 h-9 flex items-center justify-center rounded-lg transition flex-shrink-0 ${isPreviewing ? "bg-blue-100 text-blue-600" : "bg-slate-100 text-slate-400 hover:bg-slate-200 hover:text-slate-600"}`}
+                              title="View invoice items">
+                              <Icon name="eye" size={16} />
+                            </button>
+                          </div>
+                          {/* Invoice Items Preview */}
+                          {isPreviewing && (
+                            <div className="mx-3 mb-3 bg-white border border-slate-200 rounded-lg overflow-hidden">
+                              <div className="bg-slate-100 px-3 py-1.5 flex justify-between text-xs font-semibold text-slate-500">
+                                <span>Item</span><span>Amount</span>
+                              </div>
+                              {invItems.length > 0 ? invItems.map((item, idx) => {
+                                const prodName = products.data.find(p => p.id === item.product_id)?.name || item.product_name || "Item";
+                                return (
+                                  <div key={idx} className="px-3 py-2 flex justify-between items-center border-t border-slate-100 text-xs">
+                                    <div>
+                                      <p className="font-medium text-slate-700">{prodName}</p>
+                                      <p className="text-slate-400">{item.quantity} {item.unit} × {shortLKR(item.unit_price)}/{item.price_label || item.unit}</p>
+                                    </div>
+                                    <p className="font-bold text-slate-700">{shortLKR(item.line_total)}</p>
+                                  </div>
+                                );
+                              }) : (
+                                <p className="px-3 py-2 text-xs text-slate-400 text-center">No items found</p>
+                              )}
+                              <div className="px-3 py-2 bg-blue-50 border-t border-blue-200 flex justify-between text-xs font-bold">
+                                <span className="text-slate-600">Invoice Total</span>
+                                <span className="text-blue-700">{LKR(inv.invoice_total)}</span>
+                              </div>
                             </div>
-                            <div className="text-right">
-                              <p className="font-bold text-red-600 text-sm">{LKR(inv.remaining)}</p>
-                              <p className="text-xs text-slate-400">owing</p>
-                            </div>
-                          </button>
+                          )}
                           {selected && (
                             <div className="px-3 pb-3 pt-1 border-t border-violet-200">
                               <div className="flex items-center gap-2">
@@ -2178,25 +2212,53 @@ function Payments({ suppliers, payments, paymentAllocations, getOutstanding, not
                   </div>
                 </div>
                 <div className="space-y-2">
-                  {fifoPreview.allocations.map((a, i) => (
-                    <div key={i} className={`rounded-xl p-3 border ${a.fully_settled ? "bg-emerald-50 border-emerald-200" : "bg-white border-slate-200"}`}>
-                      <div className="flex items-center justify-between">
-                        <div>
+                  {fifoPreview.allocations.map((a, i) => {
+                    const isPreviewing = previewInvoiceId === a.purchase_id;
+                    const invItems = purchaseItems.data.filter(it => it.purchase_id === a.purchase_id);
+                    return (
+                    <div key={i} className={`rounded-xl border ${a.fully_settled ? "bg-emerald-50 border-emerald-200" : "bg-white border-slate-200"}`}>
+                      <div className="flex items-center p-3">
+                        <div className="flex-1 min-w-0">
                           <p className="font-semibold text-sm text-slate-700">
                             {a.fully_settled && <span className="text-emerald-600">✓ </span>}
                             Invoice #{a.invoice_number}
                           </p>
                           <p className="text-xs text-slate-400">{fmtDate(a.invoice_date)} • Owed: {shortLKR(a.remaining_before)}</p>
                         </div>
-                        <div className="text-right">
+                        <div className="text-right mr-2 flex-shrink-0">
                           <p className="font-bold text-emerald-600 text-sm">−{shortLKR(a.allocated_amount)}</p>
                           {a.fully_settled
                             ? <p className="text-xs text-emerald-600 font-semibold">FULLY PAID</p>
                             : <p className="text-xs text-slate-400">Left: {shortLKR(a.remaining_after)}</p>}
                         </div>
+                        <button onClick={() => setPreviewInvoiceId(isPreviewing ? null : a.purchase_id)}
+                          className={`w-8 h-8 flex items-center justify-center rounded-lg transition flex-shrink-0 ${isPreviewing ? "bg-blue-100 text-blue-600" : "bg-slate-100 text-slate-400 hover:bg-slate-200"}`}
+                          title="View invoice items">
+                          <Icon name="eye" size={14} />
+                        </button>
                       </div>
+                      {isPreviewing && (
+                        <div className="mx-3 mb-3 bg-white border border-slate-200 rounded-lg overflow-hidden">
+                          <div className="bg-slate-100 px-3 py-1.5 flex justify-between text-xs font-semibold text-slate-500">
+                            <span>Item</span><span>Amount</span>
+                          </div>
+                          {invItems.length > 0 ? invItems.map((item, idx) => {
+                            const prodName = products.data.find(p => p.id === item.product_id)?.name || item.product_name || "Item";
+                            return (
+                              <div key={idx} className="px-3 py-2 flex justify-between items-center border-t border-slate-100 text-xs">
+                                <div>
+                                  <p className="font-medium text-slate-700">{prodName}</p>
+                                  <p className="text-slate-400">{item.quantity} {item.unit} × {shortLKR(item.unit_price)}/{item.price_label || item.unit}</p>
+                                </div>
+                                <p className="font-bold text-slate-700">{shortLKR(item.line_total)}</p>
+                              </div>
+                            );
+                          }) : <p className="px-3 py-2 text-xs text-slate-400 text-center">No items found</p>}
+                        </div>
+                      )}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
                 <div className="border-t border-blue-200 pt-3 flex justify-between items-center">
                   <span className="text-sm font-semibold text-slate-600">Total allocated:</span>
