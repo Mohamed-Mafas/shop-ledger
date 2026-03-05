@@ -780,15 +780,18 @@ function Suppliers({ suppliers, getOutstanding, notify, askConfirm, purchases, p
                       {suppPurchases.map(p => {
                         const pItems = purchaseItems.data.filter(i => i.purchase_id === p.id);
                         return (
-                          <div key={p.id} className="bg-white border border-slate-200 rounded-xl p-3">
-                            <div className="flex justify-between items-start">
-                              <div>
+                          <details key={p.id} className="bg-white border border-slate-200 rounded-xl">
+                            <summary className="flex justify-between items-center p-3 cursor-pointer hover:bg-slate-50 rounded-xl list-none">
+                              <div className="flex-1">
                                 <p className="font-semibold text-slate-700">{fmtDate(p.invoice_date)} {p.invoice_number ? `• #${p.invoice_number}` : ""}</p>
                                 <p className="text-xs text-slate-400">{p.payment_type} • {pItems.length} item{pItems.length !== 1 ? "s" : ""}</p>
                               </div>
-                              <p className="font-bold text-blue-600">{LKR(p.total_amount)}</p>
-                            </div>
-                            <div className="mt-2 space-y-1">
+                              <div className="text-right ml-3">
+                                <p className="font-bold text-blue-600">{LKR(p.total_amount)}</p>
+                                <p className="text-xs text-slate-400">Tap to view ▾</p>
+                              </div>
+                            </summary>
+                            <div className="px-3 pb-3 pt-1 border-t border-slate-100 space-y-1">
                               {pItems.map(item => (
                                 <div key={item.id} className="flex justify-between text-xs text-slate-500 pl-2 border-l-2 border-blue-200">
                                   <span>{item.product_name || "Item"} × {item.quantity} {item.unit}</span>
@@ -796,7 +799,7 @@ function Suppliers({ suppliers, getOutstanding, notify, askConfirm, purchases, p
                                 </div>
                               ))}
                             </div>
-                          </div>
+                          </details>
                         );
                       })}
                     </div>
