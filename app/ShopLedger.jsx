@@ -2701,6 +2701,214 @@ function Reports({ suppliers, products, purchases, purchaseItems, payments, retu
 
   const activeSuppliers = suppliers.data.filter(s => s.is_active);
 
+  // ── Export helpers ──
+  const downloadCSV = (filename, headers, rows) => {
+    const escape = (v) => {
+      const s = String(v ?? "");
+      return s.includes(",") || s.includes('"') || s.includes("\n") ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const csv = [headers.map(escape).join(","), ...rows.map(r => r.map(escape).join(","))].join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = filename + ".csv"; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const printPDF = (title, contentHtml) => {
+    const win = window.open("", "_blank");
+    win.document.write(`<!DOCTYPE html><html><head><title>${title}</title><style>
+      body { font-family: Arial, sans-serif; padding: 20px; color: #333; }
+      h1 { font-size: 20px; margin-bottom: 4px; }
+      h2 { font-size: 14px; color: #666; margin-bottom: 16px; font-weight: normal; }
+      table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px; }
+      th { background: #f1f5f9; text-align: left; padding: 8px; border-bottom: 2px solid #cbd5e1; font-weight: 600; }
+      td { padding: 8px; border-bottom: 1px solid #e2e8f0; }
+      .right { text-align: right; }
+      .total-row { background: #f8fafc; font-weight: bold; }
+      .debit { color: #dc2626; }
+      .credit { color: #059669; }
+      .bold { font-weight: bold; }
+      .summary-box { display: inline-block; padding: 12px 24px; margin: 8px; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center; }
+      @media print { body { padding: 0; } }
+    </style></head><body>${contentHtml}</body></html>`);
+    win.document.close();
+    setTimeout(() => { win.print(); }, 500);
+  };
+
+  // ── Build report data (shared between render and export) ──
+  const getOutstandingData = () => {
+    return activeSuppliers.map(s => ({ name: s.name, phone: s.phone || "", outstanding: getOutstanding(s.id) })).sort((a, b) => b.outstanding - a.outstanding);
+  };
+
+  const getLedgerData = () => {
+    if (!filterSupplier) return { supp: null, ledger: [], balance: 0 };
+    const supp = suppliers.data.find(s => s.id === filterSupplier);
+    const ledger = [];
+    const ob = parseFloat(supp?.opening_balance) || 0;
+    const obDate = supp?.opening_balance_date || "2000-01-01";
+    if (ob > 0 && (!dateFrom || obDate >= dateFrom) && (!dateTo || obDate <= dateTo)) {
+      ledger.push({ date: obDate, type: "Opening", desc: "Opening Balance — B/F", debit: ob, credit: 0, isOpening: true });
+    }
+    purchases.data.filter(p => p.supplier_id === filterSupplier && (!dateFrom || p.invoice_date >= dateFrom) && (!dateTo || p.invoice_date <= dateTo)).forEach(p => {
+      if (p.payment_type === "Credit" || p.payment_type === "Partial") {
+        ledger.push({ date: p.invoice_date, type: "Purchase", desc: `Invoice ${p.invoice_number || "N/A"} (${p.payment_type})`, debit: p.total_amount - (p.amount_paid || 0), credit: 0 });
+      }
+    });
+    payments.data.filter(p => p.supplier_id === filterSupplier && (!dateFrom || p.payment_date >= dateFrom) && (!dateTo || p.payment_date <= dateTo)).forEach(p => {
+      const allocs = paymentAllocations.data.filter(a => a.payment_id === p.id);
+      let desc = `${p.payment_method} ${p.reference_number || ""}`;
+      if (allocs.length > 0) {
+        const invoiceRefs = allocs.map(a => { const inv = purchases.data.find(pu => pu.id === a.purchase_id); return `#${inv?.invoice_number || "N/A"} (${shortLKR(a.allocated_amount)})`; }).join(", ");
+        desc += ` → ${invoiceRefs}`;
+      }
+      ledger.push({ date: p.payment_date, type: "Payment", desc, debit: 0, credit: p.amount });
+    });
+    returns.data.filter(r => r.supplier_id === filterSupplier && (!dateFrom || r.return_date >= dateFrom) && (!dateTo || r.return_date <= dateTo)).forEach(r => {
+      ledger.push({ date: r.return_date, type: "Return", desc: r.reason || "Goods returned", debit: 0, credit: r.total_amount });
+    });
+    ledger.sort((a, b) => a.date.localeCompare(b.date));
+    let balance = 0;
+    ledger.forEach(l => { balance += l.debit - l.credit; l.balance = balance; });
+    return { supp, ledger, balance };
+  };
+
+  const getPurchasesData = () => {
+    return purchases.data.filter(p => {
+      if (filterSupplier && p.supplier_id !== filterSupplier) return false;
+      if (dateFrom && p.invoice_date < dateFrom) return false;
+      if (dateTo && p.invoice_date > dateTo) return false;
+      return true;
+    }).sort((a, b) => b.invoice_date.localeCompare(a.invoice_date));
+  };
+
+  const getPaymentsData = () => {
+    return payments.data.filter(p => {
+      if (filterSupplier && p.supplier_id !== filterSupplier) return false;
+      if (dateFrom && p.payment_date < dateFrom) return false;
+      if (dateTo && p.payment_date > dateTo) return false;
+      return true;
+    }).sort((a, b) => b.payment_date.localeCompare(a.payment_date));
+  };
+
+  const getSummaryData = () => {
+    const sP = purchases.data.filter(p => (!dateFrom || p.invoice_date >= dateFrom) && (!dateTo || p.invoice_date <= dateTo));
+    const sPay = payments.data.filter(p => (!dateFrom || p.payment_date >= dateFrom) && (!dateTo || p.payment_date <= dateTo));
+    const sR = returns.data.filter(r => (!dateFrom || r.return_date >= dateFrom) && (!dateTo || r.return_date <= dateTo));
+    return { sP, sPay, sR };
+  };
+
+  // ── Export functions ──
+  const dateRange = () => {
+    if (dateFrom && dateTo) return `${fmtDate(dateFrom)} to ${fmtDate(dateTo)}`;
+    if (dateFrom) return `From ${fmtDate(dateFrom)}`;
+    if (dateTo) return `Up to ${fmtDate(dateTo)}`;
+    return "All dates";
+  };
+
+  const exportCSV = () => {
+    switch (report) {
+      case "outstanding": {
+        const data = getOutstandingData();
+        downloadCSV("Outstanding_Summary", ["Supplier", "Phone", "Outstanding (LKR)"],
+          data.map(d => [d.name, d.phone, d.outstanding.toFixed(2)]));
+        break;
+      }
+      case "supplier-ledger": {
+        const { supp, ledger } = getLedgerData();
+        if (!supp) return;
+        downloadCSV(`Ledger_${supp.name.replace(/\s/g, "_")}`,
+          ["Date", "Type", "Description", "Debit (LKR)", "Credit (LKR)", "Balance (LKR)"],
+          ledger.map(l => [fmtDate(l.date), l.type, l.desc, l.debit || "", l.credit || "", l.balance.toFixed(2)]));
+        break;
+      }
+      case "purchases": {
+        const data = getPurchasesData();
+        downloadCSV("Purchase_Report", ["Date", "Supplier", "Invoice #", "Payment Type", "Total (LKR)"],
+          data.map(p => [fmtDate(p.invoice_date), suppliers.data.find(s => s.id === p.supplier_id)?.name || "", p.invoice_number || "", p.payment_type, p.total_amount.toFixed(2)]));
+        break;
+      }
+      case "payments": {
+        const data = getPaymentsData();
+        downloadCSV("Payment_Report", ["Date", "Supplier", "Method", "Reference", "Amount (LKR)"],
+          data.map(p => [fmtDate(p.payment_date), suppliers.data.find(s => s.id === p.supplier_id)?.name || "", p.payment_method, p.reference_number || "", p.amount.toFixed(2)]));
+        break;
+      }
+      case "summary": {
+        const { sP, sPay, sR } = getSummaryData();
+        downloadCSV("Period_Summary", ["Category", "Count", "Total (LKR)"], [
+          ["Purchases", sP.length, sP.reduce((s, p) => s + p.total_amount, 0).toFixed(2)],
+          ["Payments", sPay.length, sPay.reduce((s, p) => s + p.amount, 0).toFixed(2)],
+          ["Returns", sR.length, sR.reduce((s, r) => s + r.total_amount, 0).toFixed(2)],
+        ]);
+        break;
+      }
+    }
+  };
+
+  const exportPDF = () => {
+    const dr = dateRange();
+    switch (report) {
+      case "outstanding": {
+        const data = getOutstandingData();
+        const total = data.reduce((s, d) => s + d.outstanding, 0);
+        printPDF("Outstanding Summary", `
+          <h1>Outstanding Summary</h1><h2>As at ${fmtDate(today())}</h2>
+          <table><thead><tr><th>Supplier</th><th>Phone</th><th class="right">Outstanding (LKR)</th></tr></thead><tbody>
+          ${data.map(d => `<tr><td>${d.name}</td><td>${d.phone}</td><td class="right ${d.outstanding > 0 ? "debit" : "credit"}">${shortLKR(d.outstanding)}</td></tr>`).join("")}
+          <tr class="total-row"><td colspan="2" class="right">Total:</td><td class="right debit">${shortLKR(total)}</td></tr>
+          </tbody></table>`);
+        break;
+      }
+      case "supplier-ledger": {
+        const { supp, ledger, balance } = getLedgerData();
+        if (!supp) return;
+        printPDF(`Supplier Ledger - ${supp.name}`, `
+          <h1>Supplier Ledger — ${supp.name}</h1><h2>${dr} | Outstanding: LKR ${shortLKR(balance)}</h2>
+          <table><thead><tr><th>Date</th><th>Type</th><th>Description</th><th class="right">Debit</th><th class="right">Credit</th><th class="right">Balance</th></tr></thead><tbody>
+          ${ledger.map(l => `<tr><td>${fmtDate(l.date)}</td><td>${l.type}</td><td>${l.desc}</td>
+          <td class="right debit">${l.debit ? shortLKR(l.debit) : "-"}</td><td class="right credit">${l.credit ? shortLKR(l.credit) : "-"}</td>
+          <td class="right bold ${l.balance > 0 ? "debit" : "credit"}">${shortLKR(l.balance)}</td></tr>`).join("")}
+          </tbody></table>`);
+        break;
+      }
+      case "purchases": {
+        const data = getPurchasesData();
+        const total = data.reduce((s, p) => s + p.total_amount, 0);
+        printPDF("Purchase Report", `
+          <h1>Purchase Report</h1><h2>${dr} | ${data.length} purchases | Total: LKR ${shortLKR(total)}</h2>
+          <table><thead><tr><th>Date</th><th>Supplier</th><th>Invoice #</th><th>Type</th><th class="right">Amount (LKR)</th></tr></thead><tbody>
+          ${data.map(p => `<tr><td>${fmtDate(p.invoice_date)}</td><td>${suppliers.data.find(s => s.id === p.supplier_id)?.name || ""}</td>
+          <td>${p.invoice_number || "-"}</td><td>${p.payment_type}</td><td class="right">${shortLKR(p.total_amount)}</td></tr>`).join("")}
+          <tr class="total-row"><td colspan="4" class="right">Total:</td><td class="right">${shortLKR(total)}</td></tr>
+          </tbody></table>`);
+        break;
+      }
+      case "payments": {
+        const data = getPaymentsData();
+        const total = data.reduce((s, p) => s + p.amount, 0);
+        printPDF("Payment Report", `
+          <h1>Payment Report</h1><h2>${dr} | ${data.length} payments | Total: LKR ${shortLKR(total)}</h2>
+          <table><thead><tr><th>Date</th><th>Supplier</th><th>Method</th><th>Reference</th><th class="right">Amount (LKR)</th></tr></thead><tbody>
+          ${data.map(p => `<tr><td>${fmtDate(p.payment_date)}</td><td>${suppliers.data.find(s => s.id === p.supplier_id)?.name || ""}</td>
+          <td>${p.payment_method}</td><td>${p.reference_number || "-"}</td><td class="right">${shortLKR(p.amount)}</td></tr>`).join("")}
+          <tr class="total-row"><td colspan="4" class="right">Total:</td><td class="right">${shortLKR(total)}</td></tr>
+          </tbody></table>`);
+        break;
+      }
+      case "summary": {
+        const { sP, sPay, sR } = getSummaryData();
+        printPDF("Period Summary", `
+          <h1>Period Summary</h1><h2>${dr}</h2>
+          <table><thead><tr><th>Category</th><th class="right">Count</th><th class="right">Total (LKR)</th></tr></thead><tbody>
+          <tr><td>Purchases</td><td class="right">${sP.length}</td><td class="right">${shortLKR(sP.reduce((s, p) => s + p.total_amount, 0))}</td></tr>
+          <tr><td>Payments</td><td class="right">${sPay.length}</td><td class="right">${shortLKR(sPay.reduce((s, p) => s + p.amount, 0))}</td></tr>
+          <tr><td>Returns</td><td class="right">${sR.length}</td><td class="right">${shortLKR(sR.reduce((s, r) => s + r.total_amount, 0))}</td></tr>
+          </tbody></table>`);
+        break;
+      }
+    }
+  };
+
   const reportTypes = [
     { id: "outstanding", label: "Outstanding Summary", icon: "money", desc: "All suppliers with current balances", color: "bg-red-50 border-red-200 text-red-700" },
     { id: "supplier-ledger", label: "Supplier Ledger", icon: "users", desc: "Full transaction history per supplier", color: "bg-blue-50 border-blue-200 text-blue-700" },
@@ -2711,8 +2919,8 @@ function Reports({ suppliers, products, purchases, purchaseItems, payments, retu
 
   const renderReport = () => {
     switch (report) {
-      case "outstanding":
-        const outData = activeSuppliers.map(s => ({ name: s.name, phone: s.phone, outstanding: getOutstanding(s.id) })).sort((a, b) => b.outstanding - a.outstanding);
+      case "outstanding": {
+        const outData = getOutstandingData();
         const totalOut = outData.reduce((s, d) => s + d.outstanding, 0);
         return (
           <div className="space-y-3">
@@ -2728,41 +2936,11 @@ function Reports({ suppliers, products, purchases, purchaseItems, payments, retu
             ))}
           </div>
         );
+      }
 
-      case "supplier-ledger":
-        if (!filterSupplier) return <p className="text-center text-slate-400 py-8">Select a supplier above</p>;
-        const supp = suppliers.data.find(s => s.id === filterSupplier);
-        const ledger = [];
-        // Opening balance as first entry (only show if no dateFrom filter, or if OB date is within range)
-        const ob = parseFloat(supp?.opening_balance) || 0;
-        const obDate = supp?.opening_balance_date || "2000-01-01";
-        if (ob > 0 && (!dateFrom || obDate >= dateFrom) && (!dateTo || obDate <= dateTo)) {
-          ledger.push({ date: obDate, type: "Opening", desc: `Opening Balance — B/F`, debit: ob, credit: 0, isOpening: true });
-        }
-        purchases.data.filter(p => p.supplier_id === filterSupplier && (!dateFrom || p.invoice_date >= dateFrom) && (!dateTo || p.invoice_date <= dateTo)).forEach(p => {
-          if (p.payment_type === "Credit" || p.payment_type === "Partial") {
-            ledger.push({ date: p.invoice_date, type: "Purchase", desc: `Invoice ${p.invoice_number || "N/A"} (${p.payment_type})`, debit: p.total_amount - (p.amount_paid || 0), credit: 0 });
-          }
-        });
-        payments.data.filter(p => p.supplier_id === filterSupplier && (!dateFrom || p.payment_date >= dateFrom) && (!dateTo || p.payment_date <= dateTo)).forEach(p => {
-          const allocs = paymentAllocations.data.filter(a => a.payment_id === p.id);
-          let desc = `${p.payment_method} ${p.reference_number || ""}`;
-          if (allocs.length > 0) {
-            const invoiceRefs = allocs.map(a => {
-              const inv = purchases.data.find(pu => pu.id === a.purchase_id);
-              return `#${inv?.invoice_number || "N/A"} (${shortLKR(a.allocated_amount)})`;
-            }).join(", ");
-            desc += ` → ${invoiceRefs}`;
-          }
-          ledger.push({ date: p.payment_date, type: "Payment", desc, debit: 0, credit: p.amount });
-        });
-        returns.data.filter(r => r.supplier_id === filterSupplier && (!dateFrom || r.return_date >= dateFrom) && (!dateTo || r.return_date <= dateTo)).forEach(r => {
-          ledger.push({ date: r.return_date, type: "Return", desc: r.reason || "Goods returned", debit: 0, credit: r.total_amount });
-        });
-        ledger.sort((a, b) => a.date.localeCompare(b.date));
-        let balance = 0;
-        ledger.forEach(l => { balance += l.debit - l.credit; l.balance = balance; });
-
+      case "supplier-ledger": {
+        const { supp, ledger, balance } = getLedgerData();
+        if (!supp) return <p className="text-center text-slate-400 py-8">Select a supplier above</p>;
         return (
           <div className="space-y-3">
             <div className="bg-slate-50 rounded-xl p-4">
@@ -2793,14 +2971,10 @@ function Reports({ suppliers, products, purchases, purchaseItems, payments, retu
             </div>
           </div>
         );
+      }
 
-      case "purchases":
-        const filteredP = purchases.data.filter(p => {
-          if (filterSupplier && p.supplier_id !== filterSupplier) return false;
-          if (dateFrom && p.invoice_date < dateFrom) return false;
-          if (dateTo && p.invoice_date > dateTo) return false;
-          return true;
-        }).sort((a, b) => b.invoice_date.localeCompare(a.invoice_date));
+      case "purchases": {
+        const filteredP = getPurchasesData();
         const totalP = filteredP.reduce((s, p) => s + p.total_amount, 0);
         return (
           <div className="space-y-3">
@@ -2816,14 +2990,10 @@ function Reports({ suppliers, products, purchases, purchaseItems, payments, retu
             })}
           </div>
         );
+      }
 
-      case "payments":
-        const filteredPay = payments.data.filter(p => {
-          if (filterSupplier && p.supplier_id !== filterSupplier) return false;
-          if (dateFrom && p.payment_date < dateFrom) return false;
-          if (dateTo && p.payment_date > dateTo) return false;
-          return true;
-        }).sort((a, b) => b.payment_date.localeCompare(a.payment_date));
+      case "payments": {
+        const filteredPay = getPaymentsData();
         const totalPay = filteredPay.reduce((s, p) => s + p.amount, 0);
         return (
           <div className="space-y-3">
@@ -2839,11 +3009,10 @@ function Reports({ suppliers, products, purchases, purchaseItems, payments, retu
             })}
           </div>
         );
+      }
 
-      case "summary":
-        const sP = purchases.data.filter(p => (!dateFrom || p.invoice_date >= dateFrom) && (!dateTo || p.invoice_date <= dateTo));
-        const sPay = payments.data.filter(p => (!dateFrom || p.payment_date >= dateFrom) && (!dateTo || p.payment_date <= dateTo));
-        const sR = returns.data.filter(r => (!dateFrom || r.return_date >= dateFrom) && (!dateTo || r.return_date <= dateTo));
+      case "summary": {
+        const { sP, sPay, sR } = getSummaryData();
         return (
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="bg-blue-50 rounded-xl p-5 text-center"><p className="text-sm text-blue-600 font-semibold">Purchases</p><p className="text-2xl font-extrabold text-blue-700">{LKR(sP.reduce((s, p) => s + p.total_amount, 0))}</p><p className="text-xs text-blue-500">{sP.length} invoices</p></div>
@@ -2851,6 +3020,7 @@ function Reports({ suppliers, products, purchases, purchaseItems, payments, retu
             <div className="bg-orange-50 rounded-xl p-5 text-center"><p className="text-sm text-orange-600 font-semibold">Returns</p><p className="text-2xl font-extrabold text-orange-700">{LKR(sR.reduce((s, r) => s + r.total_amount, 0))}</p><p className="text-xs text-orange-500">{sR.length} returns</p></div>
           </div>
         );
+      }
 
       default: return null;
     }
@@ -2911,6 +3081,20 @@ function Reports({ suppliers, products, purchases, purchaseItems, payments, retu
           </div>
 
           {renderReport()}
+
+          {/* Export Buttons */}
+          {report && (
+            <div className="flex gap-3 pt-2">
+              <button onClick={exportCSV}
+                className="flex-1 flex items-center justify-center gap-2 py-3 bg-emerald-600 text-white rounded-xl font-bold text-sm hover:bg-emerald-700 transition">
+                <Icon name="save" size={18} /> Export CSV (Excel)
+              </button>
+              <button onClick={exportPDF}
+                className="flex-1 flex items-center justify-center gap-2 py-3 bg-blue-600 text-white rounded-xl font-bold text-sm hover:bg-blue-700 transition">
+                <Icon name="save" size={18} /> Export PDF
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>
