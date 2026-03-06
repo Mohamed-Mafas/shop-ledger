@@ -435,12 +435,14 @@ export default function ShopLedger() {
 
   // ── Compute supplier outstanding ──
   const getOutstanding = useCallback((suppId) => {
+    const supp = suppliers.data.find(s => s.id === suppId);
+    const openingBalance = parseFloat(supp?.opening_balance) || 0;
     const creditPurchases = purchases.data.filter(p => p.supplier_id === suppId && (p.payment_type === "Credit" || p.payment_type === "Partial"))
       .reduce((s, p) => s + (p.total_amount - (p.amount_paid || 0)), 0);
     const totalPayments = payments.data.filter(p => p.supplier_id === suppId).reduce((s, p) => s + p.amount, 0);
     const totalReturns = returns.data.filter(r => r.supplier_id === suppId).reduce((s, r) => s + r.total_amount, 0);
-    return Math.round((creditPurchases - totalPayments - totalReturns) * 100) / 100;
-  }, [purchases.data, payments.data, returns.data]);
+    return Math.round((openingBalance + creditPurchases - totalPayments - totalReturns) * 100) / 100;
+  }, [suppliers.data, purchases.data, payments.data, returns.data]);
 
   const getLastPrice = useCallback((prodId) => {
     const items = purchaseItems.data.filter(i => i.product_id === prodId);
@@ -532,7 +534,7 @@ export default function ShopLedger() {
 
         <div className="p-4 md:p-6 lg:p-6 max-w-7xl mx-auto">
           {page === "dashboard" && <Dashboard {...{ suppliers, products, purchases, purchaseItems, payments, returns, getOutstanding, setPage, notify, user }} />}
-          {page === "suppliers" && <Suppliers {...{ suppliers, getOutstanding, notify, askConfirm, purchases, purchaseItems, payments, returns }} />}
+          {page === "suppliers" && <Suppliers {...{ suppliers, getOutstanding, notify, askConfirm, purchases, purchaseItems, payments, returns, getInvoiceAllocations, paymentAllocations }} />}
           {page === "products" && <Products {...{ products, getLastPrice, notify, askConfirm }} />}
           {page === "purchases" && <Purchases {...{ suppliers, products, purchases, purchaseItems, getOutstanding, getLastPrice, notify, askConfirm, refreshAll, purchaseDraftRef, getInvoiceAllocations, payments }} />}
           {page === "payments" && <Payments {...{ suppliers, payments, paymentAllocations, getOutstanding, notify, askConfirm, refreshAll, computeFifoPreview, getPaymentAllocations, getUnpaidInvoices, purchases, purchaseItems, products }} />}
@@ -773,26 +775,31 @@ function Dashboard({ suppliers, products, purchases, purchaseItems, payments, re
 // ═══════════════════════════════════════
 //  SUPPLIERS
 // ═══════════════════════════════════════
-function Suppliers({ suppliers, getOutstanding, notify, askConfirm, purchases, purchaseItems, payments, returns }) {
+function Suppliers({ suppliers, getOutstanding, notify, askConfirm, purchases, purchaseItems, payments, returns, getInvoiceAllocations, paymentAllocations }) {
   const [search, setSearch] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({ name: "", phone: "", address: "", notes: "" });
+  const [form, setForm] = useState({ name: "", phone: "", address: "", notes: "", opening_balance: "", opening_balance_date: "" });
   const [viewSupplier, setViewSupplier] = useState(null);
   const [viewInvoice, setViewInvoice] = useState(null);
 
   const filtered = suppliers.data.filter(s => s.is_active && s.name.toLowerCase().includes(search.toLowerCase()));
 
-  const openNew = () => { setForm({ name: "", phone: "", address: "", notes: "" }); setEditing(null); setShowForm(true); };
-  const openEdit = (s) => { setForm({ name: s.name, phone: s.phone || "", address: s.address || "", notes: s.notes || "" }); setEditing(s.id); setShowForm(true); };
+  const openNew = () => { setForm({ name: "", phone: "", address: "", notes: "", opening_balance: "", opening_balance_date: "" }); setEditing(null); setShowForm(true); };
+  const openEdit = (s) => { setForm({ name: s.name, phone: s.phone || "", address: s.address || "", notes: s.notes || "", opening_balance: s.opening_balance ? String(s.opening_balance) : "", opening_balance_date: s.opening_balance_date || "" }); setEditing(s.id); setShowForm(true); };
 
   const handleSave = async () => {
     if (!form.name.trim()) return notify("Supplier name is required", "error");
+    const saveData = {
+      ...form,
+      opening_balance: form.opening_balance ? parseFloat(form.opening_balance) : 0,
+      opening_balance_date: form.opening_balance_date || null,
+    };
     if (editing) {
-      await suppliers.update(editing, form);
+      await suppliers.update(editing, saveData);
       notify("Supplier updated");
     } else {
-      await suppliers.add({ ...form, is_active: true });
+      await suppliers.add({ ...saveData, is_active: true });
       notify("Supplier added");
     }
     setShowForm(false);
@@ -857,6 +864,17 @@ function Suppliers({ suppliers, getOutstanding, notify, askConfirm, purchases, p
                   <p className={`text-3xl font-extrabold ${out > 0 ? "text-red-600" : "text-emerald-600"}`}>{LKR(out)}</p>
                 </div>
 
+                {/* Opening Balance */}
+                {(s.opening_balance > 0) && (
+                  <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex justify-between items-center">
+                    <div>
+                      <p className="text-sm font-semibold text-amber-700">📒 Opening Balance (B/F)</p>
+                      {s.opening_balance_date && <p className="text-xs text-amber-600">As at {fmtDate(s.opening_balance_date)}</p>}
+                    </div>
+                    <p className="font-extrabold text-amber-700">{LKR(s.opening_balance)}</p>
+                  </div>
+                )}
+
                 {/* Stats */}
                 <div className="grid grid-cols-3 gap-3">
                   <div className="bg-blue-50 rounded-xl p-3 text-center">
@@ -886,15 +904,23 @@ function Suppliers({ suppliers, getOutstanding, notify, askConfirm, purchases, p
                   <h4 className="font-bold text-slate-700 mb-2">📦 Purchases ({suppPurchases.length})</h4>
                   {suppPurchases.length ? (
                     <div className="space-y-2 max-h-60 overflow-y-auto">
-                      {suppPurchases.map(p => (
-                        <div key={p.id} onClick={() => setViewInvoice(p)} className="bg-white border border-slate-200 rounded-xl p-3 flex justify-between items-center cursor-pointer hover:bg-blue-50 hover:border-blue-300 transition active:bg-blue-100">
+                      {suppPurchases.map(p => {
+                        const allocs = getInvoiceAllocations(p.id);
+                        const totalAllocated = allocs.reduce((sum, a) => sum + a.allocated_amount, 0);
+                        const creditAmount = (p.payment_type === "Credit" || p.payment_type === "Partial") ? p.total_amount - (p.amount_paid || 0) : 0;
+                        const fullySettled = creditAmount > 0 && totalAllocated >= creditAmount;
+                        return (
+                        <div key={p.id} onClick={() => setViewInvoice(p)} className={`bg-white border rounded-xl p-3 flex justify-between items-center cursor-pointer hover:bg-blue-50 hover:border-blue-300 transition active:bg-blue-100 ${fullySettled ? "border-emerald-200" : "border-slate-200"}`}>
                           <div>
                             <p className="font-semibold text-slate-700">{fmtDate(p.invoice_date)} {p.invoice_number ? `• #${p.invoice_number}` : ""}</p>
                             <p className="text-xs text-slate-400">{p.payment_type}</p>
+                            {fullySettled && <p className="text-xs text-emerald-600 font-bold">✓ Settled via FIFO</p>}
+                            {!fullySettled && totalAllocated > 0 && <p className="text-xs text-amber-600 font-medium">Partly settled: {LKR(totalAllocated)}</p>}
                           </div>
                           <p className="font-bold text-blue-600">{LKR(p.total_amount)}</p>
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   ) : <p className="text-sm text-slate-400">No purchases yet</p>}
                 </div>
@@ -904,15 +930,23 @@ function Suppliers({ suppliers, getOutstanding, notify, askConfirm, purchases, p
                   <h4 className="font-bold text-slate-700 mb-2">💰 Payments ({suppPayments.length})</h4>
                   {suppPayments.length ? (
                     <div className="space-y-2 max-h-60 overflow-y-auto">
-                      {suppPayments.map(p => (
+                      {suppPayments.map(p => {
+                        const allocs = paymentAllocations.data.filter(a => a.payment_id === p.id);
+                        const invoiceRefs = allocs.map(a => {
+                          const inv = purchases.data.find(pu => pu.id === a.purchase_id);
+                          return `#${inv?.invoice_number || "N/A"}`;
+                        });
+                        return (
                         <div key={p.id} className="bg-white border border-slate-200 rounded-xl p-3 flex justify-between items-center">
                           <div>
                             <p className="font-semibold text-slate-700">{fmtDate(p.payment_date)}</p>
                             <p className="text-xs text-slate-400">{p.payment_method} {p.reference_number ? `• Ref: ${p.reference_number}` : ""}</p>
+                            {invoiceRefs.length > 0 && <p className="text-xs text-blue-600 font-medium">→ {invoiceRefs.join(", ")}</p>}
                           </div>
                           <p className="font-bold text-emerald-600">{LKR(p.amount)}</p>
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   ) : <p className="text-sm text-slate-400">No payments yet</p>}
                 </div>
@@ -1020,6 +1054,28 @@ function Suppliers({ suppliers, getOutstanding, notify, askConfirm, purchases, p
               <textarea value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })}
                 className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 focus:border-blue-500 outline-none" rows={2} placeholder="Optional notes" />
             </div>
+
+            {/* Opening Balance */}
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <span className="text-lg">📒</span>
+                <div>
+                  <p className="font-bold text-slate-700 text-sm">Opening Balance</p>
+                  <p className="text-xs text-slate-500">Amount already owed to this supplier before using this app</p>
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Amount (LKR)</label>
+                <input type="number" value={form.opening_balance} onChange={e => setForm({ ...form, opening_balance: e.target.value })}
+                  className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 focus:border-blue-500 outline-none text-lg font-bold text-center" placeholder="0.00" />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">As at date</label>
+                <input type="date" value={form.opening_balance_date} onChange={e => setForm({ ...form, opening_balance_date: e.target.value })}
+                  className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 focus:border-blue-500 outline-none" />
+              </div>
+            </div>
+
             <button onClick={handleSave} className="w-full py-4 bg-blue-600 text-white rounded-xl font-bold text-lg hover:bg-blue-700 transition">
               <Icon name="save" size={20} /> {editing ? "Update Supplier" : "Save Supplier"}
             </button>
@@ -2677,6 +2733,11 @@ function Reports({ suppliers, products, purchases, purchaseItems, payments, retu
         if (!filterSupplier) return <p className="text-center text-slate-400 py-8">Select a supplier above</p>;
         const supp = suppliers.data.find(s => s.id === filterSupplier);
         const ledger = [];
+        // Opening balance as first entry
+        const ob = parseFloat(supp?.opening_balance) || 0;
+        if (ob > 0) {
+          ledger.push({ date: supp.opening_balance_date || "2000-01-01", type: "Opening", desc: `Opening Balance — B/F${supp.opening_balance_date ? "" : ""}`, debit: ob, credit: 0, isOpening: true });
+        }
         purchases.data.filter(p => p.supplier_id === filterSupplier).forEach(p => {
           if (p.payment_type === "Credit" || p.payment_type === "Partial") {
             ledger.push({ date: p.invoice_date, type: "Purchase", desc: `Invoice ${p.invoice_number || "N/A"} (${p.payment_type})`, debit: p.total_amount - (p.amount_paid || 0), credit: 0 });
@@ -2717,10 +2778,10 @@ function Reports({ suppliers, products, purchases, purchaseItems, payments, retu
                 </thead>
                 <tbody>
                   {ledger.map((l, i) => (
-                    <tr key={i} className="border-b border-slate-100">
-                      <td className="p-2">{fmtDate(l.date)}</td>
-                      <td className="p-2"><span className={`px-2 py-0.5 rounded text-xs font-semibold ${l.type === "Purchase" ? "bg-blue-100 text-blue-700" : l.type === "Payment" ? "bg-emerald-100 text-emerald-700" : "bg-orange-100 text-orange-700"}`}>{l.type}</span></td>
-                      <td className="p-2 text-slate-600">{l.desc}</td>
+                    <tr key={i} className={`border-b border-slate-100 ${l.isOpening ? "bg-amber-50" : ""}`}>
+                      <td className="p-2">{l.isOpening && !l.date ? "-" : fmtDate(l.date)}</td>
+                      <td className="p-2"><span className={`px-2 py-0.5 rounded text-xs font-semibold ${l.type === "Purchase" ? "bg-blue-100 text-blue-700" : l.type === "Payment" ? "bg-emerald-100 text-emerald-700" : l.type === "Opening" ? "bg-amber-100 text-amber-700" : "bg-orange-100 text-orange-700"}`}>{l.type}</span></td>
+                      <td className={`p-2 ${l.isOpening ? "font-semibold text-amber-700" : "text-slate-600"}`}>{l.desc}</td>
                       <td className="p-2 text-right text-red-600 font-medium">{l.debit ? shortLKR(l.debit) : "-"}</td>
                       <td className="p-2 text-right text-emerald-600 font-medium">{l.credit ? shortLKR(l.credit) : "-"}</td>
                       <td className={`p-2 text-right font-bold ${l.balance > 0 ? "text-red-600" : "text-emerald-600"}`}>{shortLKR(l.balance)}</td>
