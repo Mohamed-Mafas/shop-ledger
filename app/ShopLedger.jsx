@@ -2733,17 +2733,18 @@ function Reports({ suppliers, products, purchases, purchaseItems, payments, retu
         if (!filterSupplier) return <p className="text-center text-slate-400 py-8">Select a supplier above</p>;
         const supp = suppliers.data.find(s => s.id === filterSupplier);
         const ledger = [];
-        // Opening balance as first entry
+        // Opening balance as first entry (only show if no dateFrom filter, or if OB date is within range)
         const ob = parseFloat(supp?.opening_balance) || 0;
-        if (ob > 0) {
-          ledger.push({ date: supp.opening_balance_date || "2000-01-01", type: "Opening", desc: `Opening Balance — B/F${supp.opening_balance_date ? "" : ""}`, debit: ob, credit: 0, isOpening: true });
+        const obDate = supp?.opening_balance_date || "2000-01-01";
+        if (ob > 0 && (!dateFrom || obDate >= dateFrom) && (!dateTo || obDate <= dateTo)) {
+          ledger.push({ date: obDate, type: "Opening", desc: `Opening Balance — B/F`, debit: ob, credit: 0, isOpening: true });
         }
-        purchases.data.filter(p => p.supplier_id === filterSupplier).forEach(p => {
+        purchases.data.filter(p => p.supplier_id === filterSupplier && (!dateFrom || p.invoice_date >= dateFrom) && (!dateTo || p.invoice_date <= dateTo)).forEach(p => {
           if (p.payment_type === "Credit" || p.payment_type === "Partial") {
             ledger.push({ date: p.invoice_date, type: "Purchase", desc: `Invoice ${p.invoice_number || "N/A"} (${p.payment_type})`, debit: p.total_amount - (p.amount_paid || 0), credit: 0 });
           }
         });
-        payments.data.filter(p => p.supplier_id === filterSupplier).forEach(p => {
+        payments.data.filter(p => p.supplier_id === filterSupplier && (!dateFrom || p.payment_date >= dateFrom) && (!dateTo || p.payment_date <= dateTo)).forEach(p => {
           const allocs = paymentAllocations.data.filter(a => a.payment_id === p.id);
           let desc = `${p.payment_method} ${p.reference_number || ""}`;
           if (allocs.length > 0) {
@@ -2755,7 +2756,7 @@ function Reports({ suppliers, products, purchases, purchaseItems, payments, retu
           }
           ledger.push({ date: p.payment_date, type: "Payment", desc, debit: 0, credit: p.amount });
         });
-        returns.data.filter(r => r.supplier_id === filterSupplier).forEach(r => {
+        returns.data.filter(r => r.supplier_id === filterSupplier && (!dateFrom || r.return_date >= dateFrom) && (!dateTo || r.return_date <= dateTo)).forEach(r => {
           ledger.push({ date: r.return_date, type: "Return", desc: r.reason || "Goods returned", debit: 0, credit: r.total_amount });
         });
         ledger.sort((a, b) => a.date.localeCompare(b.date));
